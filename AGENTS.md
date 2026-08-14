@@ -2,6 +2,9 @@
 
 `outline.md` is the only source of truth for project intent; read it before non-trivial work.
 
+## Output style
+All agent responses to the user must use ASD-STE100 Simplified Technical English: short sentences, active voice, present tense procedures, approved-word vocabulary, one idea per sentence. Code and file contents are exempt; this applies to prose only.
+
 ## Stack
 Tauri 2 (Rust core, `src-tauri/`) + SvelteKit / Svelte 5 + TypeScript / Vite (web frontend, root), macOS-first. Package manager: `pnpm` (v11+, configured via `pnpm-workspace.yaml` with `allowBuilds: esbuild: true`). Rust toolchain pinned to current stable via `rust-toolchain.toml`.
 
@@ -30,8 +33,8 @@ GitHub flow: short-lived feature branches off `main`, merged via PR. The repo is
 
 ## Agent orchestration (opencode)
 Multi-agent setup lives in `opencode.json` + `.opencode/agents/`. Model split:
-- **Planning/orchestration** (primary `plan`, also `build`): `opencode-go/glm-5.2`.
+- **Planning/orchestration** (primaries `plan`, `orchestrator`, also `build`): `opencode-go/glm-5.2`.
 - **Execution/search/review subagents**: `opencode-go/deepseek-v4-flash` (cheap tier).
 - **`small_model`** (titles/summaries): `opencode-go/deepseek-v4-flash`.
 
-`plan` is the default primary — a read-mostly orchestrator that delegates all execution to subagents (`implementation`, `quick-implementation`, `explore`, `general`, `review`) and asks before editing directly. `build` is the Tab-switch alternative on the same GLM-5.2 model that can edit directly. `subagent_depth: 2` allows `implementation` to further delegate to `quick-implementation`. The global `orchestrator`/`implementation`/`review`/`quick-implementation`/`explore` skills (auto-loaded from `~/.agents/skills/`) define the workflows; the project `.opencode/agents/*.md` files define the registered agents that the orchestrator actually spawns. Config is loaded once at startup, so restart opencode after editing any of these files.
+`orchestrator` is the default primary — plans, aligns with the user, then delegates execution/search/review to cheap subagents (`implementation`, `quick-implementation`, `explore`, `general`, `review`). It is read-only: it never edits files or runs bash directly — including post-review fix-ups — so all behavior-changing edits and all verification go through subagents. The orchestrator also delegates a `git commit` to `quick-implementation` once a logical unit of work is reviewed; `git push`/`merge` stay manual user steps under GitHub flow. `plan` is the read-only alternative — plans and researches via `explore`/`general`/`review` subagents only; cannot spawn `implementation` or `quick-implementation`; cannot edit or run bash directly. `build` is the edit-capable Tab-switch alternative. `subagent_depth: 2` allows `implementation` to further delegate to `quick-implementation`. The global `orchestrator`/`implementation`/`review`/`quick-implementation`/`explore` skills (auto-loaded from `~/.agents/skills/`) define the workflows; the project `.opencode/agents/*.md` files define the registered agents that the orchestrator actually spawns. Config is loaded once at startup, so restart opencode after editing any of these files.

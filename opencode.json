@@ -2,17 +2,34 @@
   "$schema": "https://opencode.ai/config.json",
   "model": "opencode-go/glm-5.2",
   "small_model": "opencode-go/deepseek-v4-flash",
-  "default_agent": "plan",
+  "default_agent": "orchestrator",
   "subagent_depth": 2,
   "agent": {
     "plan": {
       "mode": "primary",
       "model": "opencode-go/glm-5.2",
-      "description": "Orchestrator on GLM-5.2. Plans, aligns with the user, then delegates execution/search/review to cheap subagents. Read-mostly; does not edit directly.",
+      "description": "Read-only planning agent on GLM-5.2. Plans and aligns with the user. Can research via explore/general/review subagents but cannot delegate execution or edit directly.",
       "prompt": "{file:.opencode/prompts/plan.txt}",
       "permission": {
-        "edit": "ask",
-        "bash": "ask",
+        "edit": "deny",
+        "bash": "deny",
+        "skill": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow",
+          "general": "allow",
+          "review": "allow"
+        }
+      }
+    },
+    "orchestrator": {
+      "mode": "primary",
+      "model": "opencode-go/glm-5.2",
+      "description": "Orchestrator on GLM-5.2. Plans, aligns with the user, then delegates execution/search/review to cheap subagents. Read-only: never edits or runs bash directly; all behavior-changing work and verification go through subagents.",
+      "prompt": "{file:.opencode/prompts/orchestrator.txt}",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
         "skill": "allow",
         "task": {
           "*": "deny",
@@ -27,7 +44,7 @@
     "build": {
       "mode": "primary",
       "model": "opencode-go/glm-5.2",
-      "description": "Edit-capable primary on GLM-5.2. Delegates heavy work to cheap subagents but can edit directly when convenient. Tab-switch alternative to plan."
+      "description": "Edit-capable primary on GLM-5.2. Delegates heavy work to cheap subagents but can edit directly when convenient. Tab-switch alternative to orchestrator."
     },
     "general": {
       "mode": "subagent",
