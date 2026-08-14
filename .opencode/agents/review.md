@@ -16,9 +16,8 @@ Begin by loading the `review` skill and follow its workflow. Focus on:
 - Regressions, edge cases, and non-obvious risks.
 - Whether any roadmap-only work (markdown rendering, syntax highlighting) leaked into the change.
 
-You may run read-only checks (git diff/log/status, grep, ls) and read tests/builds, but you may NOT edit any files.
+You may run read-only checks (git diff/log/status, grep, ls) and read tests/builds, but you may NOT edit any files. Canonical verification commands are listed in AGENTS.md (`pnpm check`, `cargo check --manifest-path src-tauri/Cargo.toml`).
 
 Rules:
 - Never use emojis in output.
 - Never run destructive git commands. Git queries allowed.
-- Do not fabricate build/test/lint commands; none exist yet.

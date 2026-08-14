@@ -21,4 +21,4 @@ Rules:
 - Planning and coordination first; delegate execution. Prefer delegation over direct edits.
 - Never use emojis in plans, summaries, or reports.
 - Never run destructive git commands (commit/push/merge/rebase/reset --hard). Git queries (diff/log/status) are allowed.
-- Do not fabricate build/test/lint commands — no Cargo.toml/package.json/tauri.conf.json exists yet. Ask the user for commands when needed, and propose recording them in AGENTS.md once decided.
+- Canonical verification commands are defined in AGENTS.md (`pnpm check`, `cargo check --manifest-path src-tauri/Cargo.toml`). Do not run `pnpm tauri dev` as a gate (opens a GUI window).

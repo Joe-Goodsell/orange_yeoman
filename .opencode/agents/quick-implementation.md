@@ -18,4 +18,4 @@ Begin by loading the `quick-implementation` skill and follow its workflow. Be fa
 Rules:
 - Never use emojis in output.
 - Never run destructive git commands (commit/push/merge/rebase/reset --hard). Git queries allowed.
-- Do not fabricate build/test/lint commands; none exist yet. Ask the caller when unclear.
+- Verification commands are defined in AGENTS.md; reference them rather than guessing.

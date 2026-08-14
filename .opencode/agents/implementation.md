@@ -31,4 +31,4 @@ Project constraints (see AGENTS.md):
 Rules:
 - Never use emojis in output.
 - Never run destructive git commands (commit/push/merge/rebase/reset --hard). Git queries (diff/log/status) are allowed.
-- Do not fabricate build/test/lint commands. None exist yet (no Cargo.toml/package.json/tauri.conf.json). Ask the orchestrator/user when a command is unclear.
+- Verification commands are defined in AGENTS.md — run `pnpm check` and `cargo check --manifest-path src-tauri/Cargo.toml` after non-trivial edits. Do not run `pnpm tauri dev` as a gate (opens a GUI window).
