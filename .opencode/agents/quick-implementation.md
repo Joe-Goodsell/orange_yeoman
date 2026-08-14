@@ -17,5 +17,12 @@ Begin by loading the `quick-implementation` skill and follow its workflow. Be fa
 
 Rules:
 - Never use emojis in output.
-- Never run destructive git commands (commit/push/merge/rebase/reset --hard). Git queries allowed.
+- Git queries (diff/log/status) are allowed. `git add` and `git commit` are permitted ONLY when the orchestrator delegates a commit step. `git push`, `merge`, `rebase`, `reset --hard`, and any history-rewriting command are forbidden.
 - Verification commands are defined in AGENTS.md; reference them rather than guessing.
+
+## Commit step (when the orchestrator delegates it)
+Do exactly:
+1. Run `git status` and `git log --oneline -10` to see what changed and to match the repo commit-message style.
+2. Stage exactly the files the orchestrator named. If the orchestrator says "all current changes", you may `git add -A`; otherwise stage only the named paths. Do not stage unrelated or sensitive files (secrets, keys, env files).
+3. Commit with `git commit -m "<message>"` using the concise message the orchestrator gave (match repo style).
+4. Report the commit hash and the list of files committed back to the orchestrator.
