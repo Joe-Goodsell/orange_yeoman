@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/glm-5.2",
+  "small_model": "opencode-go/deepseek-v4-flash",
+  "default_agent": "plan",
+  "subagent_depth": 2,
+  "agent": {
+    "plan": {
+      "mode": "primary",
+      "model": "opencode-go/glm-5.2",
+      "description": "Orchestrator on GLM-5.2. Plans, aligns with the user, then delegates execution/search/review to cheap subagents. Read-mostly; does not edit directly.",
+      "prompt": "{file:.opencode/prompts/plan.txt}",
+      "permission": {
+        "edit": "ask",
+        "bash": "ask",
+        "skill": "allow",
+        "task": {
+          "*": "deny",
+          "explore": "allow",
+          "general": "allow",
+          "implementation": "allow",
+          "quick-implementation": "allow",
+          "review": "allow"
+        }
+      }
+    },
+    "build": {
+      "mode": "primary",
+      "model": "opencode-go/glm-5.2",
+      "description": "Edit-capable primary on GLM-5.2. Delegates heavy work to cheap subagents but can edit directly when convenient. Tab-switch alternative to plan."
+    },
+    "general": {
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4-flash",
+      "description": "General-purpose execution/research subagent on the cheap model. Use for ad-hoc multi-step work that does not fit implementation/review/explore."
+    },
+    "explore": {
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4-flash",
+      "description": "Read-only codebase exploration subagent on the cheap model. Use for fast file pattern searches, keyword lookups, and codebase questions."
+    },
+    "scout": {
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4-flash",
+      "description": "External docs/dependency research subagent on the cheap model. Use to inspect upstream library source and cross-reference docs."
+    }
+  }
+}
