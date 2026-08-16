@@ -1,7 +1,13 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ChangeEvent, ConfigStatus, FileEntry } from "./types";
+import type {
+  ChangeEvent,
+  ConfigStatus,
+  FileEntry,
+  LlmRequest,
+  LlmResponse,
+} from "./types";
 
 export async function pickFolder(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false });
@@ -47,4 +53,11 @@ export async function loadProjectConfig(root: string | null): Promise<ConfigStat
 // Emitted by Rust when the watched repository's .orange-yeoman.json changes.
 export function onConfigChanged(cb: (s: ConfigStatus) => void): Promise<UnlistenFn> {
   return listen<ConfigStatus>("config://changed", (event) => cb(event.payload));
+}
+
+// LLM completion through the provider boundary. Rust dispatches to the
+// app-owned provider (currently the deterministic mock). No editor, store, or
+// UI wiring yet; this is the thin invoke wrapper for the boundary.
+export async function completeLlm(request: LlmRequest): Promise<LlmResponse> {
+  return invoke<LlmResponse>("complete_llm", { request });
 }
