@@ -6,6 +6,7 @@
 
 mod config;
 mod filesystem;
+mod llm;
 mod watcher;
 
 use tauri::Manager;
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(watcher::WatcherState::default())
         .manage(config::ConfigState::default())
+        .manage(llm::LlmState::default())
         .setup(|app| {
             // Initialize the merged config with built-in defaults plus the
             // global config. No config file is created; missing files are valid.
@@ -31,6 +33,7 @@ pub fn run() {
             config::load_project_config,
             filesystem::list_dir,
             filesystem::read_text_file,
+            llm::complete_llm,
             watcher::start_watcher,
             watcher::stop_watcher
         ])
