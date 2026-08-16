@@ -4,9 +4,16 @@
   import AgentPane from "$lib/AgentPane.svelte";
   import FileTree from "$lib/FileTree.svelte";
   import { project } from "$lib/stores/project.svelte";
-  import { pickFolder, startWatcher, stopWatcher, onWatcherChange } from "$lib/tauri";
+  import {
+    pickFolder,
+    startWatcher,
+    stopWatcher,
+    onWatcherChange,
+    onConfigChanged,
+  } from "$lib/tauri";
 
   let unlistenWatcher: (() => void) | null = null;
+  let unlistenConfig: (() => void) | null = null;
   let alive = true;
   // Track the root already started so the $effect skips the initial value
   // (onMount starts the initial watcher after the listener is registered).
@@ -14,14 +21,20 @@
 
   onMount(async () => {
     const un = await onWatcherChange((e) => project.pushChange(e));
+    const unCfg = await onConfigChanged((status) => project.applyConfigStatus(status));
     if (!alive) {
       un();
+      unCfg();
       return;
     }
     unlistenWatcher = un;
-    // Start the watcher for the initial/persisted root only after the
-    // listener is ready, so no early events are dropped.
+    unlistenConfig = unCfg;
     if (project.projectRoot) {
+      // Refresh the merged config status for the persisted root. The global
+      // config was already loaded during Rust app setup.
+      project.loadProjectConfig(project.projectRoot);
+      // Start the watcher for the initial/persisted root only after the
+      // listener is ready, so no early events are dropped.
       startWatcher(project.projectRoot).catch((e) => {
         project.error = String(e);
         project.watching = false;
@@ -32,6 +45,7 @@
   onDestroy(() => {
     alive = false;
     unlistenWatcher?.();
+    unlistenConfig?.();
     // Best-effort stop; ignore promise rejection
     stopWatcher().catch(() => {});
   });

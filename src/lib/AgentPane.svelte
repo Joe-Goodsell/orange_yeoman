@@ -26,6 +26,36 @@
     <h2>Agents</h2>
   </header>
 
+  {#if project.configStatus}
+    <section class="config">
+      <h3 class="config-title">Config</h3>
+      {#if project.configError}
+        <p class="config-error">Config error: {project.configError}</p>
+      {:else}
+        <p class="config-ok">Config loaded</p>
+      {/if}
+      <p class="config-line">
+        Small model: <span class="mono">{project.configStatus.small_model}</span>
+      </p>
+      <p class="config-line">
+        Large model: <span class="mono">{project.configStatus.large_model}</span>
+      </p>
+      <p class="config-line">
+        Providers:
+        {#if project.configStatus.configured_providers.length > 0}
+          {project.configStatus.configured_providers.join(", ")}
+        {:else}
+          none
+        {/if}
+      </p>
+      <p class="config-meta">
+        Global: {project.configStatus.global_loaded ? "loaded" : "absent"}
+        &middot; Project:
+        {project.configStatus.project_loaded ? "loaded" : "absent"}
+      </p>
+    </section>
+  {/if}
+
   {#if showEmpty}
     <div class="empty">
       <p class="empty-title">No agents active</p>
@@ -80,6 +110,56 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.7;
+  }
+
+  .config {
+    flex: 0 0 auto;
+    margin-top: 10px;
+    padding: 8px 10px;
+    font-size: 12px;
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.08);
+  }
+
+  .config-title {
+    margin: 0 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+  }
+
+  .config-ok,
+  .config-error {
+    margin: 0 0 4px;
+    font-weight: 500;
+  }
+
+  .config-ok {
+    color: rgba(140, 210, 180, 0.95);
+  }
+
+  .config-error {
+    color: rgba(220, 140, 140, 0.95);
+    word-break: break-word;
+  }
+
+  .config-line {
+    margin: 2px 0;
+    opacity: 0.85;
+  }
+
+  .config-meta {
+    margin: 4px 0 0;
+    font-size: 11px;
+    opacity: 0.5;
+  }
+
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
   }
 
   .empty {

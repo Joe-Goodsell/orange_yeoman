@@ -1,0 +1,10 @@
+{
+  "apiKeys": {
+    "openai": "YOUR_OPENAI_API_KEY",
+    "deepseek": "YOUR_DEEPSEEK_API_KEY"
+  },
+  "models": {
+    "small": "deepseek-v4-flash",
+    "large": "openai-codex-5.6"
+  }
+}
