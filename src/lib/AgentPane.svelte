@@ -1,8 +1,43 @@
 <script lang="ts">
   // Right-hand side pane. Surfaces AI agent status/progress/results.
-  // For the initial scaffold there are no active agents; this placeholder also
-  // shows the live watcher change feed (structure/content events).
+  // Agent feedback cards link to their source ranges in the editor; the live
+  // watcher change feed (structure/content events) is preserved below.
   import { project } from "./stores/project.svelte";
+  import type { AgentFeedback, FeedbackKind, FeedbackStatus } from "./types";
+
+  const KIND_LABEL: Record<FeedbackKind, string> = {
+    research: "RESEARCH",
+    "fact-check": "FACT-CHECK",
+    correction: "CORRECTION",
+    ignore: "IGNORE",
+  };
+
+  const STATUS_LABEL: Record<FeedbackStatus, string> = {
+    queued: "Queued",
+    running: "Running",
+    arrived: "Arrived",
+    stale: "Stale",
+    error: "Error",
+  };
+
+  // Per-card collapse state, keyed by feedback id so it survives status
+  // updates and list reordering.
+  let expandedIds = $state<Record<string, boolean>>({});
+
+  function toggleDetail(id: string) {
+    expandedIds = { ...expandedIds, [id]: !(expandedIds[id] ?? false) };
+  }
+
+  let cardsRef = $state<HTMLDivElement | undefined>(undefined);
+
+  // Scroll the focused card into view when the editor or another card links
+  // to it.
+  $effect(() => {
+    const id = project.selectedFeedbackId;
+    if (!id || !cardsRef) return;
+    const el = cardsRef.querySelector(`[data-feedback-id="${CSS.escape(id)}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  });
 
   function basename(p: string): string {
     const parts = p.split("/").filter(Boolean);
@@ -62,6 +97,89 @@
       <p class="empty-sub">Agent activity will appear here.</p>
     </div>
   {:else}
+    <section class="feedback-section">
+      <header class="section-head">
+        <h3 class="section-title">Feedback</h3>
+        <button
+          class="demo-btn"
+          type="button"
+          onclick={() => project.seedMockFeedback()}
+          title="Seed demo feedback to preview the linked feedback UI"
+        >
+          Demo feedback
+        </button>
+      </header>
+
+      {#if project.feedback.length === 0}
+        <p class="no-feedback">
+          No agent activity yet. Research and fact-check feedback will appear
+          here.
+        </p>
+      {:else}
+        <div class="cards" bind:this={cardsRef}>
+          {#each project.feedback as item (item.id)}
+            {@const linked = project.linkedFeedbackIds.includes(item.id)}
+            {@const focused = project.selectedFeedbackId === item.id}
+            {@const expanded = expandedIds[item.id] ?? false}
+            {@const hasDetail = item.detail.length > 0}
+            {@const detailId = `${item.id}-detail`}
+            <article
+              class="card {item.status} {linked ? 'linked' : ''} {focused ? 'focused' : ''}"
+              data-feedback-id={item.id}
+            >
+              <header class="card-head">
+                <button
+                  class="card-title"
+                  type="button"
+                  onclick={() => project.focusFeedback(item.id)}
+                  title="Reveal this range in the editor"
+                >
+                  {item.title}
+                </button>
+                <span class="badge {item.kind}">{KIND_LABEL[item.kind]}</span>
+              </header>
+              <p class="card-status {item.status}">{STATUS_LABEL[item.status]}</p>
+              <p class="card-summary">{item.summary}</p>
+              {#if item.status === "stale"}
+                <p class="stale-note">
+                  File changed since this feedback was produced. Review before
+                  relying on it.
+                </p>
+                <button
+                  class="rerun-btn"
+                  type="button"
+                  onclick={() => project.requeueFeedback(item.id)}
+                >
+                  Re-run
+                </button>
+              {/if}
+              {#if hasDetail}
+                <button
+                  class="toggle"
+                  type="button"
+                  aria-expanded={expanded}
+                  aria-controls={detailId}
+                  onclick={() => toggleDetail(item.id)}
+                >
+                  {expanded ? "Collapse" : "Expand"} full response
+                </button>
+                <div
+                  id={detailId}
+                  class="detail"
+                  role="region"
+                  aria-label="Full response"
+                  hidden={!expanded}
+                >
+                  <p class="detail-text">{item.detail}</p>
+                </div>
+              {/if}
+              <p class="card-time">Updated {fmtTime(item.updatedAt)}</p>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
     <div class="feed-scroll">
       {#if project.watching}
         <div class="status">Watching {rootName}</div>
@@ -184,8 +302,208 @@
     font-size: 12px;
   }
 
-  .feed-scroll {
+  /* ---- Feedback cards ---- */
+
+  .feedback-section {
     flex: 1 1 auto;
+    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+    margin-top: 10px;
+  }
+
+  .section-head {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .section-title {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+  }
+
+  .demo-btn {
+    font-size: 10px;
+    padding: 2px 8px;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.7;
+  }
+
+  .demo-btn:hover {
+    background-color: rgba(128, 128, 128, 0.15);
+  }
+
+  .no-feedback {
+    margin: 0;
+    padding: 4px 6px;
+    font-size: 12px;
+    opacity: 0.45;
+  }
+
+  .cards {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-right: 2px;
+  }
+
+  .card {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 6px;
+    background: rgba(128, 128, 128, 0.07);
+    font-size: 12px;
+  }
+
+  .card.linked {
+    border-color: rgba(140, 210, 180, 0.55);
+  }
+
+  .card.focused {
+    outline: 1px solid rgba(255, 255, 255, 0.4);
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .card-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: inherit;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-title:hover {
+    text-decoration: underline;
+  }
+
+  .card-status {
+    margin: 6px 0 0;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .card-status.queued {
+    color: rgba(190, 190, 190, 0.7);
+  }
+
+  .card-status.running {
+    color: rgba(220, 190, 130, 0.95);
+  }
+
+  .card-status.arrived {
+    color: rgba(140, 210, 180, 0.95);
+  }
+
+  .card-status.stale {
+    color: rgba(220, 160, 120, 0.95);
+  }
+
+  .card-status.error {
+    color: rgba(230, 140, 140, 0.95);
+  }
+
+  .card-summary {
+    margin: 4px 0 0;
+    opacity: 0.85;
+  }
+
+  .stale-note {
+    margin: 6px 0 0;
+    color: rgba(220, 160, 120, 0.9);
+  }
+
+  .rerun-btn {
+    margin: 6px 4px 0 0;
+    font-size: 11px;
+    padding: 2px 8px;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .rerun-btn:hover {
+    background-color: rgba(128, 128, 128, 0.15);
+  }
+
+  .toggle {
+    margin-top: 6px;
+    font-size: 11px;
+    padding: 2px 0;
+    background: transparent;
+    border: none;
+    color: inherit;
+    opacity: 0.7;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+
+  .toggle:hover {
+    opacity: 1;
+  }
+
+  .detail {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-left: 2px solid rgba(128, 128, 128, 0.3);
+    background: rgba(128, 128, 128, 0.08);
+    border-radius: 0 4px 4px 0;
+  }
+
+  .detail-text {
+    margin: 0;
+    font-size: 11px;
+    opacity: 0.9;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .card-time {
+    margin: 6px 0 0;
+    font-size: 10px;
+    opacity: 0.45;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- Watcher feed (preserved) ---- */
+
+  .feed-scroll {
+    flex: 0 1 auto;
+    max-height: 40%;
     overflow-y: auto;
     min-height: 0;
     margin: 10px 0 8px;
@@ -250,6 +568,26 @@
   .badge.content {
     background: rgba(90, 160, 130, 0.22);
     color: rgba(140, 210, 180, 0.95);
+  }
+
+  .badge.research {
+    background: rgba(120, 150, 200, 0.25);
+    color: rgba(170, 190, 230, 0.95);
+  }
+
+  .badge.fact-check {
+    background: rgba(90, 160, 130, 0.22);
+    color: rgba(140, 210, 180, 0.95);
+  }
+
+  .badge.correction {
+    background: rgba(200, 160, 90, 0.22);
+    color: rgba(220, 190, 130, 0.95);
+  }
+
+  .badge.ignore {
+    background: rgba(128, 128, 128, 0.22);
+    color: rgba(200, 200, 200, 0.9);
   }
 
   .feed-path {
