@@ -106,6 +106,26 @@ pub(crate) struct ConfigState {
     inner: Mutex<MergedConfig>,
 }
 
+impl ConfigState {
+    /// Current small model id from the merged config.
+    /// Falls back to the built-in default when the lock is poisoned.
+    pub(crate) fn small_model(&self) -> String {
+        self.inner
+            .lock()
+            .map(|guard| guard.small_model.clone())
+            .unwrap_or_else(|_| DEFAULT_SMALL_MODEL.to_string())
+    }
+
+    /// Current large model id from the merged config.
+    /// Falls back to the built-in default when the lock is poisoned.
+    pub(crate) fn large_model(&self) -> String {
+        self.inner
+            .lock()
+            .map(|guard| guard.large_model.clone())
+            .unwrap_or_else(|_| DEFAULT_LARGE_MODEL.to_string())
+    }
+}
+
 impl Default for ConfigState {
     fn default() -> Self {
         ConfigState {
