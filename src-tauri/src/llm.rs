@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 // Kind of LLM work requested by the frontend. Serialized as snake_case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LlmRequestKind {
     Extraction,
@@ -222,6 +222,13 @@ impl LlmProvider for MockProvider {
 // Shared provider state held by Tauri. Defaults to the mock provider.
 pub(crate) struct LlmState {
     provider: Arc<dyn LlmProvider>,
+}
+
+impl LlmState {
+    /// Clone of the current provider Arc, for dispatch sites outside this module.
+    pub(crate) fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
+    }
 }
 
 impl Default for LlmState {

@@ -7,8 +7,11 @@
 mod config;
 mod filesystem;
 mod llm;
+mod pipeline;
+mod tasks;
 mod watcher;
 
+use std::sync::Arc;
 use tauri::Manager;
 
 pub use filesystem::FileEntry;
@@ -21,6 +24,7 @@ pub fn run() {
         .manage(watcher::WatcherState::default())
         .manage(config::ConfigState::default())
         .manage(llm::LlmState::default())
+        .manage(Arc::new(tasks::TaskStore::default()))
         .setup(|app| {
             // Initialize the merged config with built-in defaults plus the
             // global config. No config file is created; missing files are valid.
@@ -34,6 +38,10 @@ pub fn run() {
             filesystem::list_dir,
             filesystem::read_text_file,
             llm::complete_llm,
+            tasks::submit_auto_task,
+            tasks::submit_fact_check,
+            tasks::submit_research,
+            tasks::get_task_status,
             watcher::start_watcher,
             watcher::stop_watcher
         ])

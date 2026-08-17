@@ -49,3 +49,38 @@ export interface LlmResponse {
   result: unknown;
   usage: LlmUsage;
 }
+
+// Task domain types. Field names are camelCase because the Rust core
+// serializes them with serde rename_all = "camelCase". Status and trigger
+// values are lowercase snake_case strings matching the Rust enums.
+
+export type TaskStatus = "queued" | "running" | "completed" | "failed" | "stale";
+
+export type Trigger = "automatic" | "fact_check" | "research";
+
+export interface TaskMetadata {
+  taskId: string;
+  filePath: string | null;
+  blockHash: string;
+  sourceHash: string;
+  trigger: Trigger;
+  status: TaskStatus;
+  stale: boolean;
+  error: string | null;
+}
+
+export interface TaskEvent {
+  taskId: string;
+  status: TaskStatus;
+  kind: LlmRequestKind;
+  stale: boolean;
+  error: string | null;
+}
+
+export interface TaskResult {
+  taskId: string;
+  status: TaskStatus;
+  stale: boolean;
+  result: unknown | null;
+  error: string | null;
+}

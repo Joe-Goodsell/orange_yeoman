@@ -7,6 +7,9 @@ import type {
   FileEntry,
   LlmRequest,
   LlmResponse,
+  TaskEvent,
+  TaskMetadata,
+  TaskResult,
 } from "./types";
 
 export async function pickFolder(): Promise<string | null> {
@@ -60,4 +63,62 @@ export function onConfigChanged(cb: (s: ConfigStatus) => void): Promise<Unlisten
 // UI wiring yet; this is the thin invoke wrapper for the boundary.
 export async function completeLlm(request: LlmRequest): Promise<LlmResponse> {
   return invoke<LlmResponse>("complete_llm", { request });
+}
+
+// Task submission and status commands. These wire the pipeline to the task
+// store in Rust. Auto submissions may return null when routing decides the
+// block needs no work; explicit fact-check and research submissions always
+// return a task id.
+
+export async function submitAutoTask(
+  filePath: string | null,
+  blockText: string,
+): Promise<string | null> {
+  return invoke<string | null>("submit_auto_task", { filePath, blockText });
+}
+
+export async function submitFactCheck(
+  filePath: string | null,
+  claimText: string,
+  blockText: string,
+  headingChain: string[],
+  sourceHash: string,
+): Promise<string> {
+  return invoke<string>("submit_fact_check", {
+    filePath,
+    claimText,
+    blockText,
+    headingChain,
+    sourceHash,
+  });
+}
+
+export async function submitResearch(
+  filePath: string | null,
+  goal: string,
+  selection: string,
+  document: string,
+  sourceHash: string,
+): Promise<string> {
+  return invoke<string>("submit_research", {
+    filePath,
+    goal,
+    selection,
+    document,
+    sourceHash,
+  });
+}
+
+export async function getTaskStatus(taskId: string): Promise<TaskMetadata | null> {
+  return invoke<TaskMetadata | null>("get_task_status", { taskId });
+}
+
+// Task lifecycle events emitted by Rust on the "agent://" channels.
+
+export function onTaskUpdated(cb: (event: TaskEvent) => void): Promise<UnlistenFn> {
+  return listen<TaskEvent>("agent://task-updated", (event) => cb(event.payload));
+}
+
+export function onResultReady(cb: (result: TaskResult) => void): Promise<UnlistenFn> {
+  return listen<TaskResult>("agent://result-ready", (event) => cb(event.payload));
 }
