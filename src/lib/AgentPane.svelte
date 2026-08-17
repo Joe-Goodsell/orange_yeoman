@@ -39,6 +39,39 @@
     el?.scrollIntoView({ block: "nearest" });
   });
 
+  // Focusing a section (via the editor link or its own header) expands it so
+  // the full response is visible. A manual collapse afterwards stays collapsed:
+  // the latch only re-expands when a new id is focused, or the same id is
+  // focused again after focus was cleared.
+  let lastAutoExpandedId: string | null = null;
+  $effect(() => {
+    const id = project.selectedFeedbackId;
+    if (id && id !== lastAutoExpandedId) {
+      lastAutoExpandedId = id;
+      expandedIds = { ...expandedIds, [id]: true };
+    }
+    if (!id) {
+      lastAutoExpandedId = null;
+    }
+  });
+
+  // Scroll the first linked card into view when the caret enters a feedback
+  // range without an explicit focus. `lastLinkedKey` dedupes so keystrokes
+  // inside the same range do not re-scroll. Explicit focus scrolling is
+  // handled by the effect above.
+  let lastLinkedKey = "";
+  $effect(() => {
+    const linked = project.linkedFeedbackIds;
+    const key = linked.join(",");
+    if (key === lastLinkedKey) return;
+    if (!cardsRef || linked.length === 0) return;
+    lastLinkedKey = key;
+    const el = cardsRef.querySelector(
+      `[data-feedback-id="${CSS.escape(linked[0])}"]`
+    );
+    el?.scrollIntoView({ block: "nearest" });
+  });
+
   function basename(p: string): string {
     const parts = p.split("/").filter(Boolean);
     return parts[parts.length - 1] || p;
@@ -122,13 +155,16 @@
             {@const focused = project.selectedFeedbackId === item.id}
             {@const expanded = expandedIds[item.id] ?? false}
             {@const hasDetail = item.detail.length > 0}
+            {@const titleId = `${item.id}-title`}
             {@const detailId = `${item.id}-detail`}
-            <article
+            <section
               class="card {item.status} {linked ? 'linked' : ''} {focused ? 'focused' : ''}"
               data-feedback-id={item.id}
+              aria-labelledby={titleId}
             >
               <header class="card-head">
                 <button
+                  id={titleId}
                   class="card-title"
                   type="button"
                   onclick={() => project.focusFeedback(item.id)}
@@ -139,6 +175,9 @@
                 <span class="badge {item.kind}">{KIND_LABEL[item.kind]}</span>
               </header>
               <p class="card-status {item.status}">{STATUS_LABEL[item.status]}</p>
+              <p class="card-model">
+                {item.provider} &middot; <span class="model-name">{item.model}</span>
+              </p>
               <p class="card-summary">{item.summary}</p>
               {#if item.status === "stale"}
                 <p class="stale-note">
@@ -174,7 +213,7 @@
                 </div>
               {/if}
               <p class="card-time">Updated {fmtTime(item.updatedAt)}</p>
-            </article>
+            </section>
           {/each}
         </div>
       {/if}
@@ -437,6 +476,18 @@
   .card-summary {
     margin: 4px 0 0;
     opacity: 0.85;
+  }
+
+  /* Model provenance: secondary metadata, always visible in both states. */
+  .card-model {
+    margin: 4px 0 0;
+    font-size: 10px;
+    opacity: 0.5;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card-model .model-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
   .stale-note {

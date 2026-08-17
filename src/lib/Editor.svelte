@@ -94,20 +94,17 @@
               }
             }
             // Snapshot the selection so the agent pane can link cards whose
-            // source range overlaps the current selection. Collapsed
-            // selections clear the link.
+            // source range overlaps the current selection. A collapsed
+            // selection is a caret position (from === to) and still links
+            // ranges that contain it.
             if (u.selectionSet || u.docChanged) {
               const sel = u.state.selection.main;
-              const snapshot = sel.empty
-                ? null
-                : { from: sel.from, to: sel.to };
+              const snapshot = { from: sel.from, to: sel.to };
               const cur = project.editorSelection;
               const changed =
-                snapshot === null
-                  ? cur !== null
-                  : cur === null ||
-                    snapshot.from !== cur.from ||
-                    snapshot.to !== cur.to;
+                cur === null ||
+                snapshot.from !== cur.from ||
+                snapshot.to !== cur.to;
               if (changed) project.setEditorSelection(snapshot);
             }
           }),
@@ -315,6 +312,11 @@
 
   .editor-host :global(.cm-feedback:hover) {
     outline: 1px solid rgba(255, 255, 255, 0.35);
+  }
+
+  .editor-host :global(.cm-feedback-queued) {
+    background-color: rgba(128, 128, 128, 0.18);
+    border-radius: 2px;
   }
 
   .editor-host :global(.cm-feedback-arrived) {

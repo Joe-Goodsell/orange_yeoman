@@ -54,6 +54,11 @@ export interface AgentFeedback {
   id: string;
   kind: FeedbackKind;
   status: FeedbackStatus;
+  // Model provenance: the provider and exact model that produced this item,
+  // recorded at completion time (e.g. provider "openai", model
+  // "gpt-5.6-luna"). Later configuration changes do not alter history.
+  provider: string;
+  model: string;
   range: SourceRange;
   title: string;
   summary: string;
@@ -64,8 +69,8 @@ export interface AgentFeedback {
   updatedAt: number;
 }
 
-// Immutable snapshot of the current editor selection. Collapsed selections are
-// represented as null (no active selection to link against).
+// Immutable snapshot of the current editor selection. A collapsed selection
+// (from === to) is a caret position and links feedback ranges that contain it.
 export interface EditorSelection {
   from: number;
   to: number;
