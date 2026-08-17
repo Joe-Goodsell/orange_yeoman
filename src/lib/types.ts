@@ -20,6 +20,15 @@ export interface ConfigStatus {
   large_model: string;
   configured_providers: string[];
   error: string | null;
+  debug: boolean;
+}
+
+// Payload emitted by Rust on the "debug://event" channel when the `debug`
+// config flag is true. `ts` is stamped on the frontend at receive time.
+export interface DebugEvent {
+  category: string;
+  message: string;
+  ts: number;
 }
 
 // LLM boundary types. Field names are camelCase because the Rust core

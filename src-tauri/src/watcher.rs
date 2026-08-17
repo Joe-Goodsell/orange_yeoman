@@ -103,13 +103,23 @@ fn classify_and_emit(app: &tauri::AppHandle, root: &Path, event: &notify::Event)
     let Some((path, change)) = classify_event(root, event) else {
         return;
     };
-    match change {
+    match &change {
         ClassifiedChange::Config => {
             let status = reload_config_state(&app.state::<ConfigState>(), Some(root));
             let _ = app.emit("config://changed", status);
         }
         ClassifiedChange::Structure => emit_watcher_change(app, &path, "structure"),
         ClassifiedChange::Content => emit_watcher_change(app, &path, "content"),
+    }
+    // Debug instrumentation: report the classified change so the frontend can
+    // show what the watcher reacted to.
+    if app.state::<ConfigState>().debug() {
+        let message = match change {
+            ClassifiedChange::Config => format!("config changed: {}", root.display()),
+            ClassifiedChange::Structure => format!("structure change: {}", path.display()),
+            ClassifiedChange::Content => format!("content change: {}", path.display()),
+        };
+        crate::debug::emit_debug_event(app, "watcher", message);
     }
 }
 

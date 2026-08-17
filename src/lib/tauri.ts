@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ChangeEvent,
   ConfigStatus,
+  DebugEvent,
   FileEntry,
   LlmRequest,
   LlmResponse,
@@ -56,6 +57,20 @@ export async function loadProjectConfig(root: string | null): Promise<ConfigStat
 // Emitted by Rust when the watched repository's .orange-yeoman.json changes.
 export function onConfigChanged(cb: (s: ConfigStatus) => void): Promise<UnlistenFn> {
   return listen<ConfigStatus>("config://changed", (event) => cb(event.payload));
+}
+
+// Emitted by Rust when the `debug` config flag is true, on the
+// "debug://event" channel. Categories include "slash_command",
+// "llm_call", and "watcher". Emission is gated in Rust, so no debug
+// IPC traffic arrives when debug is false.
+export function onDebugEvent(cb: (e: DebugEvent) => void): Promise<UnlistenFn> {
+  return listen<{ category: string; message: string }>("debug://event", (event) => {
+    cb({
+      category: event.payload.category,
+      message: event.payload.message,
+      ts: Date.now(),
+    });
+  });
 }
 
 // LLM completion through the provider boundary. Rust dispatches to the

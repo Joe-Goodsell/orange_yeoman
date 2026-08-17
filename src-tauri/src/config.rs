@@ -22,6 +22,10 @@ struct ConfigFile {
     api_keys: HashMap<String, String>,
     #[serde(default)]
     models: ModelsConfig,
+    // Absent in a config file means "not supplied": apply_file skips None so
+    // an explicit false in the global config survives a partial project file.
+    #[serde(default)]
+    debug: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -54,6 +58,7 @@ pub(crate) struct ConfigStatus {
     large_model: String,
     configured_providers: Vec<String>,
     error: Option<String>,
+    debug: bool,
 }
 
 // In-memory merged config held in Tauri state. API keys never leave this struct.
@@ -65,6 +70,7 @@ struct MergedConfig {
     project_loaded: bool,
     project_path: Option<String>,
     error: Option<String>,
+    debug: bool,
 }
 
 impl Default for MergedConfig {
@@ -77,6 +83,7 @@ impl Default for MergedConfig {
             project_loaded: false,
             project_path: None,
             error: None,
+            debug: true,
         }
     }
 }
@@ -98,6 +105,7 @@ impl From<&MergedConfig> for ConfigStatus {
             large_model: m.large_model.clone(),
             configured_providers,
             error: m.error.clone(),
+            debug: m.debug,
         }
     }
 }
@@ -123,6 +131,13 @@ impl ConfigState {
             .lock()
             .map(|guard| guard.large_model.clone())
             .unwrap_or_else(|_| DEFAULT_LARGE_MODEL.to_string())
+    }
+
+    /// Current debug flag from the merged config. Debug events are emitted
+    /// only when this is true. Falls back to true (enabled) when the lock is
+    /// poisoned.
+    pub(crate) fn debug(&self) -> bool {
+        self.inner.lock().map(|m| m.debug).unwrap_or(true)
     }
 }
 
@@ -177,6 +192,9 @@ fn apply_file(merged: &mut MergedConfig, file: &ConfigFile) {
     }
     if !file.models.large.is_empty() {
         merged.large_model = file.models.large.clone();
+    }
+    if let Some(debug) = file.debug {
+        merged.debug = debug;
     }
 }
 

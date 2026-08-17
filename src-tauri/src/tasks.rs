@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::async_runtime;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Lifecycle status of a task. Serialized as lowercase strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +285,26 @@ pub(crate) fn dispatch_task(
         };
         let _ = app.emit("agent://task-updated", event);
 
+        // Debug instrumentation: report the outgoing LLM call (kind and
+        // resolved model) right before it is dispatched to the provider.
+        if app.state::<crate::config::ConfigState>().debug() {
+            let kind_str = match request.kind {
+                crate::llm::LlmRequestKind::Extraction => "extraction",
+                crate::llm::LlmRequestKind::FactCheck => "fact_check",
+                crate::llm::LlmRequestKind::Research => "research",
+            };
+            let model = request
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .unwrap_or("<unset>");
+            crate::debug::emit_debug_event(
+                &app,
+                "llm_call",
+                format!("{kind_str} -> {model}"),
+            );
+        }
+
         match provider.complete(request.clone()).await {
             Ok(response) => {
                 let stale = is_result_stale(
@@ -362,6 +382,25 @@ pub(crate) async fn submit_auto_task(
     // path, so the auto path only handles NeedsExtraction and
     // HighConfidenceLocal. /ignore silently drops the block.
     let command = crate::pipeline::parse_slash_command_in_block(&block);
+    // Debug instrumentation: report a recognized slash command so the frontend
+    // can show what the auto path saw. The argument is truncated to keep the
+    // event payload small.
+    if let Some(parsed) = &command {
+        if config_state.debug() {
+            let name = match &parsed.command {
+                crate::pipeline::SlashCommand::FactCheck => "/fact-check",
+                crate::pipeline::SlashCommand::Research => "/research",
+                crate::pipeline::SlashCommand::Ignore => "/ignore",
+            };
+            let mut message = name.to_string();
+            if let Some(argument) = &parsed.argument {
+                let truncated: String = argument.chars().take(80).collect();
+                message.push(' ');
+                message.push_str(&truncated);
+            }
+            crate::debug::emit_debug_event(&app, "slash_command", message);
+        }
+    }
     let decision = crate::pipeline::route_block(&block, command.as_ref());
     match decision {
         crate::pipeline::RoutingDecision::NeedsExtraction
@@ -436,6 +475,9 @@ pub(crate) async fn submit_fact_check(
     heading_chain: Vec<String>,
     source_hash: String,
 ) -> Result<String, String> {
+    if config_state.debug() {
+        crate::debug::emit_debug_event(&app, "slash_command", "/fact-check".to_string());
+    }
     let small_model = config_state.small_model();
     let request = crate::pipeline::build_fact_check_request(
         &claim_text,
@@ -484,6 +526,9 @@ pub(crate) async fn submit_research(
     document: String,
     source_hash: String,
 ) -> Result<String, String> {
+    if config_state.debug() {
+        crate::debug::emit_debug_event(&app, "slash_command", "/research".to_string());
+    }
     let large_model = config_state.large_model();
     let request =
         crate::pipeline::build_research_request(&goal, &selection, &document, &large_model);

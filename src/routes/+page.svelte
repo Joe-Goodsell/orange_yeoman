@@ -3,17 +3,21 @@
   import Editor from "$lib/Editor.svelte";
   import AgentPane from "$lib/AgentPane.svelte";
   import FileTree from "$lib/FileTree.svelte";
+  import DebugConsole from "$lib/DebugConsole.svelte";
   import { project } from "$lib/stores/project.svelte";
+  import { debug } from "$lib/stores/debug.svelte";
   import {
     pickFolder,
     startWatcher,
     stopWatcher,
     onWatcherChange,
     onConfigChanged,
+    onDebugEvent,
   } from "$lib/tauri";
 
   let unlistenWatcher: (() => void) | null = null;
   let unlistenConfig: (() => void) | null = null;
+  let unlistenDebug: (() => void) | null = null;
   let alive = true;
   // Track the root already started so the $effect skips the initial value
   // (onMount starts the initial watcher after the listener is registered).
@@ -22,13 +26,16 @@
   onMount(async () => {
     const un = await onWatcherChange((e) => project.pushChange(e));
     const unCfg = await onConfigChanged((status) => project.applyConfigStatus(status));
+    const unDbg = await onDebugEvent((e) => debug.push(e));
     if (!alive) {
       un();
       unCfg();
+      unDbg();
       return;
     }
     unlistenWatcher = un;
     unlistenConfig = unCfg;
+    unlistenDebug = unDbg;
     if (project.projectRoot) {
       // Refresh the merged config status for the persisted root. The global
       // config was already loaded during Rust app setup.
@@ -46,6 +53,7 @@
     alive = false;
     unlistenWatcher?.();
     unlistenConfig?.();
+    unlistenDebug?.();
     // Best-effort stop; ignore promise rejection
     stopWatcher().catch(() => {});
   });
@@ -80,17 +88,22 @@
     <p class="hero-text">Choose a folder of .md notes to get started.</p>
   </div>
 {:else}
-  <main class="app">
-    <section class="tree-col">
-      <FileTree onPickFolder={openProjectPicker} />
-    </section>
-    <section class="editor-pane">
-      <Editor />
-    </section>
-    <aside class="agent-pane">
-      <AgentPane />
-    </aside>
-  </main>
+  <div class="app-shell">
+    <main class="app">
+      <section class="tree-col">
+        <FileTree onPickFolder={openProjectPicker} />
+      </section>
+      <section class="editor-pane">
+        <Editor />
+      </section>
+      <aside class="agent-pane">
+        <AgentPane />
+      </aside>
+    </main>
+    {#if project.configStatus?.debug}
+      <DebugConsole />
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -126,9 +139,17 @@
     opacity: 0.5;
   }
 
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+  }
+
   .app {
     display: flex;
-    height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
     width: 100%;
   }
 

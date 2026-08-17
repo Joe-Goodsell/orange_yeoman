@@ -6,5 +6,6 @@
   "models": {
     "small": "deepseek-v4-flash",
     "large": "openai-codex-5.6"
-  }
+  },
+  "debug": true
 }

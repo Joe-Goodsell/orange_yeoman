@@ -5,6 +5,7 @@
 // "structure" (create/remove/rename) or "content" (.md data modify).
 
 mod config;
+mod debug;
 mod filesystem;
 mod llm;
 mod pipeline;
