@@ -48,18 +48,22 @@ class ProjectStore {
   editorSelection = $state<EditorSelection | null>(null);
 
   // Feedback items whose source range overlaps the current editor selection
-  // (same file only). Drives the "linked" highlight in the agent pane.
+  // (same file only). Drives the "linked" highlight in the agent pane. A
+  // collapsed selection is a caret position and links any range containing it.
   linkedFeedbackIds = $derived(
     (() => {
       const sel = this.editorSelection;
       if (!sel || !this.openFilePath) return [];
       return this.feedback
-        .filter(
-          (f) =>
-            f.range.file === this.openFilePath &&
-            f.range.from < sel.to &&
-            f.range.to > sel.from
-        )
+        .filter((f) => {
+          if (f.range.file !== this.openFilePath) return false;
+          if (sel.from === sel.to) {
+            // Caret linking: the caret position sits inside the range. The
+            // left boundary is inclusive so a caret at the range start links.
+            return f.range.from <= sel.from && sel.from < f.range.to;
+          }
+          return f.range.from < sel.to && f.range.to > sel.from;
+        })
         .map((f) => f.id);
     })()
   );
@@ -186,7 +190,9 @@ class ProjectStore {
   }
 
   // Snapshot of the current editor selection. The editor calls this on every
-  // selection change; collapsed selections clear the link.
+  // selection change; the agent pane links feedback cards whose source range
+  // overlaps the selection. A collapsed selection is a caret position and
+  // still links ranges that contain it.
   setEditorSelection(sel: EditorSelection | null) {
     this.editorSelection = sel;
   }
@@ -221,6 +227,8 @@ class ProjectStore {
         id: "demo-fact-1",
         kind: "fact-check",
         status: "arrived",
+        provider: "openai",
+        model: "gpt-5.6-luna",
         range: findRange(file, doc, "fact-check"),
         title: "Fact-check: source claim",
         summary:
@@ -234,6 +242,8 @@ class ProjectStore {
         id: "demo-research-1",
         kind: "research",
         status: "running",
+        provider: "anthropic",
+        model: "claude-opus-4.6",
         range: findRange(file, doc, "research"),
         title: "Research: background material",
         summary: "Searching the web for background sources...",
@@ -245,6 +255,8 @@ class ProjectStore {
         id: "demo-correct-1",
         kind: "correction",
         status: "stale",
+        provider: "openai",
+        model: "gpt-5.6-luna",
         range: findRange(file, doc, "correction"),
         title: "Correction: suggested rewording",
         summary: "Suggested a clearer rewording of this sentence.",
@@ -257,6 +269,8 @@ class ProjectStore {
         id: "demo-error-1",
         kind: "fact-check",
         status: "error",
+        provider: "anthropic",
+        model: "claude-opus-4.6",
         range: findRange(file, doc, "error"),
         title: "Fact-check: failed",
         summary: "The provider request failed. Retry to attempt again.",
