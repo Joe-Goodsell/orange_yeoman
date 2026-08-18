@@ -119,13 +119,30 @@ export interface EditorSelection {
 
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "stale";
 
-export type Trigger = "automatic" | "fact_check" | "research";
+export type Trigger =
+  | "automatic"
+  | "fact_check"
+  | "research"
+  | "inline"
+  | "command_line";
 
 export interface TaskMetadata {
   taskId: string;
   filePath: string | null;
   blockHash: string;
   sourceHash: string;
+  // File-relative byte span of the inline command line. Only present for
+  // inline-trigger tasks (focusStart/focusEnd); absent for all others.
+  // These are BYTE offsets relative to the file, not character offsets. The
+  // frontend SourceRange uses character offsets, so conversion is needed when
+  // wiring the editor.
+  focusStart?: number;
+  focusEnd?: number;
+  // Stable hash of the raw inline command line text. Line-granular staleness
+  // key: an edit to the command line itself invalidates the result, while
+  // edits to sibling lines in the same block do not. Only present for
+  // inline-trigger tasks.
+  lineTextHash?: string;
   trigger: Trigger;
   status: TaskStatus;
   stale: boolean;

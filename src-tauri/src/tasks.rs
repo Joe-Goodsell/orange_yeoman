@@ -32,6 +32,24 @@ pub(crate) struct TaskMetadata {
     pub(crate) file_path: Option<String>,
     pub(crate) block_hash: String,
     pub(crate) source_hash: String,
+    /// File-relative byte span of the inline command line. Only set for
+    /// Inline-trigger tasks; absent from JSON when None so existing frontend
+    /// consumers stay compatible. These are file-relative BYTE offsets, not
+    /// character offsets; the frontend SourceRange uses character offsets, so
+    /// conversion is needed when wiring the editor. The block_hash is the
+    /// staleness key for inline tasks; this span records where the command
+    /// line lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) focus_start: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) focus_end: Option<usize>,
+    /// Stable hash of the raw inline command line text. Only set for
+    /// Inline-trigger tasks; absent from JSON when None so existing frontend
+    /// consumers stay compatible. Staleness for inline tasks is line-granular:
+    /// an edit to the command line itself invalidates the result, while edits
+    /// to sibling lines in the same block do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) line_text_hash: Option<String>,
     pub(crate) trigger: crate::pipeline::Trigger,
     pub(crate) status: TaskStatus,
     pub(crate) stale: bool,
@@ -71,6 +89,11 @@ pub(crate) fn task_id_from_identity(
         crate::pipeline::Trigger::Automatic => "automatic",
         crate::pipeline::Trigger::FactCheck => "fact_check",
         crate::pipeline::Trigger::Research => "research",
+        // The inline-trigger variants never produce ids through this identity
+        // form; inline dispatch uses pipeline::inline_task_id (see
+        // submit_auto_task). These arms only keep the match exhaustive.
+        crate::pipeline::Trigger::Inline => "inline",
+        crate::pipeline::Trigger::CommandLine => "command_line",
     };
     let kind_str = match kind {
         crate::llm::LlmRequestKind::Extraction => "extraction",
@@ -160,6 +183,45 @@ pub(crate) fn is_result_stale(
         Err(()) => return true,
     };
     crate::pipeline::stable_hash(&content) != submitted_source_hash
+}
+
+/// Determine whether an inline command result is stale by re-parsing the file
+/// and locating the command line by the hash of its raw text. Staleness is
+/// line-granular: an edit to the command line itself invalidates the result,
+/// while edits to sibling lines in the same block or to other blocks do not.
+/// Returns true when:
+/// - the file path is None (cannot verify; treat as not stale by default), OR
+/// - the file cannot be read, OR
+/// - the file parses but no non-excluded block contains a slash command whose
+///   raw command line hashes to the submitted line_text_hash (the command line
+///   was edited or removed).
+/// Otherwise return false.
+///
+/// `read_file` is a function that takes a path and returns Ok(String) with the
+/// file content, or Err(()) if the file cannot be read. This keeps the
+/// function pure and testable.
+pub(crate) fn is_inline_result_stale(
+    file_path: Option<&str>,
+    line_text_hash: &str,
+    read_file: impl Fn(&str) -> Result<String, ()>,
+) -> bool {
+    let Some(path) = file_path else {
+        return false;
+    };
+    let content = match read_file(path) {
+        Ok(content) => content,
+        Err(()) => return true,
+    };
+    let blocks = crate::pipeline::parse_markdown_blocks(&content);
+    for block in blocks.iter().filter(|b| !b.excluded) {
+        if let Some(parsed) = crate::pipeline::parse_slash_command_in_block(block) {
+            let raw_line = &block.text[parsed.line_start..parsed.line_end];
+            if crate::pipeline::stable_hash(raw_line) == line_text_hash {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// In-memory store of active and completed tasks. Thread-safe via Mutex.
@@ -254,6 +316,22 @@ fn scrub_error(msg: &str) -> String {
         .collect()
 }
 
+/// Compute the source hash for a task: the whole-file content hash when a
+/// file path is available, otherwise the hash of the block text. The stale
+/// check in dispatch_task re-reads the file and hashes its content, so a
+/// block hash would never match and every task with a file_path would be
+/// marked stale.
+fn source_hash_of(file_path: &Option<String>, block_text: &str) -> Result<String, String> {
+    match file_path {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| scrub_error(&format!("file not readable: {e}")))?;
+            Ok(crate::pipeline::stable_hash(&content))
+        }
+        None => Ok(crate::pipeline::stable_hash(block_text)),
+    }
+}
+
 /// Dispatch an LLM task asynchronously. Returns the task_id immediately.
 /// The provider call runs in a spawned async task. Events are emitted on completion.
 ///
@@ -307,11 +385,26 @@ pub(crate) fn dispatch_task(
 
         match provider.complete(request.clone()).await {
             Ok(response) => {
-                let stale = is_result_stale(
-                    metadata.file_path.as_deref(),
-                    &metadata.source_hash,
-                    |path| std::fs::read_to_string(path).map_err(|_| ()),
-                );
+                // Inline command tasks anchor to a single command line, so
+                // their staleness is line-granular: re-parse the file and
+                // check the raw command line's hash. A missing line_text_hash
+                // cannot be verified and is treated as stale. Every other task
+                // compares the whole-file content hash, so any edit anywhere
+                // in the file marks it stale.
+                let stale = if metadata.trigger == crate::pipeline::Trigger::Inline {
+                    let line_text_hash = metadata.line_text_hash.as_deref().unwrap_or_default();
+                    is_inline_result_stale(
+                        metadata.file_path.as_deref(),
+                        line_text_hash,
+                        |path| std::fs::read_to_string(path).map_err(|_| ()),
+                    )
+                } else {
+                    is_result_stale(
+                        metadata.file_path.as_deref(),
+                        &metadata.source_hash,
+                        |path| std::fs::read_to_string(path).map_err(|_| ()),
+                    )
+                };
                 let (status, stale_flag) = if stale {
                     (TaskStatus::Stale, true)
                 } else {
@@ -359,9 +452,11 @@ pub(crate) fn dispatch_task(
 // the Arc is cloned from the managed state and handed to the spawned task.
 
 /// Process a block of markdown automatically: parse, classify, route, and
-/// dispatch an extraction when the routing decision is NeedsExtraction or
-/// HighConfidenceLocal. Skip and Ignore decisions do nothing. Returns the new
-/// task id, or None when no task was dispatched.
+/// dispatch. An inline /fact-check command dispatches a fact-check task with
+/// the Inline trigger. A needs-extraction block dispatches an extraction task.
+/// Inline /research and /ignore are recognized but not dispatched yet
+/// (roadmap), and Skip decisions do nothing. Returns the new task id, or None
+/// when no task was dispatched.
 #[tauri::command]
 pub(crate) async fn submit_auto_task(
     app: AppHandle,
@@ -376,11 +471,11 @@ pub(crate) async fn submit_auto_task(
         return Ok(None);
     };
 
-    // Parse a slash command from the block and let route_block honor it.
-    // Explicit commands (/fact-check, /research) are dispatched via the
-    // dedicated submit_fact_check / submit_research commands, not the auto
-    // path, so the auto path only handles NeedsExtraction and
-    // HighConfidenceLocal. /ignore silently drops the block.
+    // Parse a slash command from the block and let route_block honor it. An
+    // inline /fact-check command dispatches a fact-check task with the Inline
+    // trigger. Inline /research and /ignore are recognized but not dispatched
+    // yet (roadmap). Explicit commands go through the dedicated
+    // submit_fact_check / submit_research commands.
     let command = crate::pipeline::parse_slash_command_in_block(&block);
     // Debug instrumentation: report a recognized slash command so the frontend
     // can show what the auto path saw. The argument is truncated to keep the
@@ -403,29 +498,82 @@ pub(crate) async fn submit_auto_task(
     }
     let decision = crate::pipeline::route_block(&block, command.as_ref());
     match decision {
+        crate::pipeline::RoutingDecision::FactCheck => {
+            // Inline /fact-check: dispatch a fact-check task. route_block
+            // returns FactCheck only when a parsed command is present, so the
+            // command is guaranteed to exist here. The claim is the parsed
+            // focus text; the block text and heading chain provide context.
+            let parsed = command
+                .as_ref()
+                .expect("FactCheck decision implies a parsed command");
+            let envelope =
+                crate::pipeline::build_inline_envelope(&block, parsed, file_path.as_deref());
+            let source_hash = source_hash_of(&file_path, &block_text)?;
+            let small_model = config_state.small_model();
+            let request = crate::pipeline::build_fact_check_request(
+                &parsed.focus_text,
+                &block.text,
+                &block.heading_chain,
+                &source_hash,
+                &small_model,
+            );
+            let task_id = crate::pipeline::inline_task_id(&envelope);
+            let metadata = TaskMetadata {
+                task_id,
+                file_path,
+                block_hash: block.block_hash.clone(),
+                source_hash,
+                focus_start: Some(envelope.focus_ref.start),
+                focus_end: Some(envelope.focus_ref.end),
+                line_text_hash: Some(crate::pipeline::stable_hash(
+                    &block.text[parsed.line_start..parsed.line_end],
+                )),
+                trigger: crate::pipeline::Trigger::Inline,
+                status: TaskStatus::Queued,
+                stale: false,
+                error: None,
+            };
+            let identity = dedup_identity(
+                &metadata.block_hash,
+                crate::pipeline::Trigger::Inline,
+                crate::llm::LlmRequestKind::FactCheck,
+            );
+
+            let store_arc = store.inner().clone();
+            let provider_arc = llm_state.provider();
+            return match dispatch_task(app, store_arc, provider_arc, request, metadata, identity)
+            {
+                Ok(task_id) => Ok(Some(task_id)),
+                Err(e) if e.starts_with("duplicate") => {
+                    // Duplicate tasks are silently dropped because the
+                    // original task is still in progress and will emit its own
+                    // result.
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            };
+        }
+        crate::pipeline::RoutingDecision::Research => {
+            // Roadmap: the inline /research workload is not dispatched from
+            // the auto path yet. The command is recognized so the routing
+            // decision is authoritative; dispatch arrives in a later phase.
+            return Ok(None);
+        }
+        crate::pipeline::RoutingDecision::Ignore => {
+            // Roadmap: ignore-rule persistence is not implemented yet. The
+            // command is recognized so the routing decision is authoritative;
+            // persisting ignore rules arrives in a later phase.
+            return Ok(None);
+        }
+        crate::pipeline::RoutingDecision::Skip => return Ok(None),
         crate::pipeline::RoutingDecision::NeedsExtraction
         | crate::pipeline::RoutingDecision::HighConfidenceLocal => {}
-        crate::pipeline::RoutingDecision::Skip
-        | crate::pipeline::RoutingDecision::Ignore
-        | crate::pipeline::RoutingDecision::FactCheck
-        | crate::pipeline::RoutingDecision::Research => return Ok(None),
     }
 
     let small_model = config_state.small_model();
     let request = crate::pipeline::build_extraction_request(&block, &small_model);
     let block_hash = block.block_hash.clone();
-    // The source hash must cover the whole file, not the block text: the
-    // stale check in dispatch_task re-reads the file and hashes its content,
-    // so a block hash would never match and every automatic task with a
-    // file_path would be marked stale.
-    let source_hash = match &file_path {
-        Some(path) => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| scrub_error(&format!("file not readable: {e}")))?;
-            crate::pipeline::stable_hash(&content)
-        }
-        None => crate::pipeline::stable_hash(&block_text),
-    };
+    let source_hash = source_hash_of(&file_path, &block_text)?;
     let task_id = task_id_from_identity(
         &block_hash,
         &crate::pipeline::Trigger::Automatic,
@@ -436,6 +584,9 @@ pub(crate) async fn submit_auto_task(
         file_path,
         block_hash,
         source_hash,
+        focus_start: None,
+        focus_end: None,
+        line_text_hash: None,
         trigger: crate::pipeline::Trigger::Automatic,
         status: TaskStatus::Queued,
         stale: false,
@@ -496,6 +647,9 @@ pub(crate) async fn submit_fact_check(
         file_path,
         block_hash,
         source_hash,
+        focus_start: None,
+        focus_end: None,
+        line_text_hash: None,
         trigger: crate::pipeline::Trigger::FactCheck,
         status: TaskStatus::Queued,
         stale: false,
@@ -543,6 +697,9 @@ pub(crate) async fn submit_research(
         file_path,
         block_hash,
         source_hash,
+        focus_start: None,
+        focus_end: None,
+        line_text_hash: None,
         trigger: crate::pipeline::Trigger::Research,
         status: TaskStatus::Queued,
         stale: false,
