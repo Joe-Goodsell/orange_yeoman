@@ -7,6 +7,7 @@ import type {
   ChangeEvent,
   ConfigStatus,
   EditorSelection,
+  SourceRange,
 } from "../types";
 
 const STORAGE_KEY = "orange-yeoman:project-root";
@@ -210,6 +211,100 @@ class ProjectStore {
     window.setTimeout(() => {
       this.updateFeedback(id, { status: "arrived" });
     }, 1800);
+  }
+
+  // Dispatch a mock feedback item for a detected slash command. The range
+  // anchors the item to the paragraph the command was typed in. Task commands
+  // (/fact-check, /research) simulate the async lifecycle (queued -> running
+  // -> arrived) with timers, mirroring requeueFeedback; /ignore is a
+  // directive that arrives immediately. Unrecognized names do nothing.
+  dispatchMockFeedback(command: { name: string }, range: SourceRange): void {
+    const kind =
+      command.name === "/fact-check"
+        ? "fact-check"
+        : command.name === "/research"
+          ? "research"
+          : command.name === "/ignore"
+            ? "ignore"
+            : null;
+    if (!kind) return;
+
+    const content: Record<
+      "fact-check" | "research" | "ignore",
+      { title: string; summary: string; detail: string }
+    > = {
+      "fact-check": {
+        title: "Fact-check: mock result",
+        summary:
+          "Mock fact-check complete. 2 sources support the claim, 1 refutes it.",
+        detail: "",
+      },
+      research: {
+        title: "Research: mock results",
+        summary: "Mock research gathered 3 background sources.",
+        detail: "",
+      },
+      ignore: {
+        title: "Ignore: block excluded",
+        summary:
+          "This block is excluded from automatic research and fact-checking.",
+        detail:
+          "Marked as ignored. No agent activity will run on this block. Remove the /ignore command to re-enable automatic processing.",
+      },
+    };
+    const arrivedDetail: Record<"fact-check" | "research", string> = {
+      "fact-check":
+        "Mock sources reviewed:\n1. Source A - supports (confidence 0.91).\n2. Source B - supports (confidence 0.86).\n3. Source C - refutes (confidence 0.74).\nThe claim is mostly supported. One source refutes it; review before citing.",
+      research:
+        "Mock background sources:\n1. A 2023 overview article.\n2. A primary source document.\n3. A recent survey paper.\nThese are ready to cite in the note.",
+    };
+
+    const id = `mock-${kind}-${Date.now()}`;
+    const now = Date.now();
+    this.addFeedback({
+      id,
+      kind,
+      status: kind === "ignore" ? "arrived" : "queued",
+      provider: "mock",
+      model: "mock-1",
+      range,
+      title: content[kind].title,
+      summary: content[kind].summary,
+      detail: content[kind].detail,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (kind === "ignore") return;
+    window.setTimeout(() => {
+      this.updateFeedback(id, { status: "running" });
+    }, 700);
+    window.setTimeout(() => {
+      this.updateFeedback(id, {
+        status: "arrived",
+        detail: arrivedDetail[kind],
+      });
+    }, 1800);
+  }
+
+  // Map the source ranges of feedback items for one file through a document
+  // change. The editor passes its change set's mapPos, so ranges stay attached
+  // to the text they refer to as the user types. Items for other files are
+  // untouched. Degenerate ranges (fully deleted text) keep their mapped
+  // values; the editor's decoration guard skips from >= to. The store stays
+  // CodeMirror-free: the caller owns the mapPos callable.
+  mapFeedbackRanges(
+    mapPos: (pos: number, assoc: -1 | 1) => number,
+    file: string | null
+  ): void {
+    if (file === null) return;
+    this.feedback = this.feedback.map((item) => {
+      if (item.range.file !== file) return item;
+      let from = mapPos(item.range.from, -1);
+      let to = mapPos(item.range.to, 1);
+      if (from < 0) from = 0;
+      if (to < 0) to = 0;
+      return { ...item, range: { ...item.range, from, to } };
+    });
   }
 
   // Demo data so the linked feedback UI can be exercised without an LLM
