@@ -7,8 +7,7 @@
   "agent": {
     "plan": {
       "mode": "primary",
-      "model": "opencode-go/glm-5.2",
-      "description": "Read-only planning agent on GLM-5.2. Plans and aligns with the user. Can research via explore/general/review subagents but cannot delegate execution or edit directly.",
+      "description": "Read-only planning agent. Plans and aligns with the user. Can research via explore/general/review subagents but cannot delegate execution or edit directly.",
       "prompt": "{file:.opencode/prompts/plan.txt}",
       "permission": {
         "edit": "deny",
@@ -24,8 +23,7 @@
     },
     "orchestrator": {
       "mode": "primary",
-      "model": "opencode-go/glm-5.2",
-      "description": "Orchestrator on GLM-5.2. Plans, aligns with the user, then delegates execution/search/review to cheap subagents. Read-only: never edits or runs bash directly; all behavior-changing work and verification go through subagents.",
+      "description": "Orchestrator. Plans, aligns with the user, then delegates execution/search/review to subagents. Read-only: never edits or runs bash directly; all behavior-changing work and verification go through subagents.",
       "prompt": "{file:.opencode/prompts/orchestrator.txt}",
       "permission": {
         "edit": "deny",
@@ -36,6 +34,7 @@
           "explore": "allow",
           "general": "allow",
           "implementation": "allow",
+          "merge": "allow",
           "quick-implementation": "allow",
           "review": "allow"
         }
@@ -43,8 +42,7 @@
     },
     "build": {
       "mode": "primary",
-      "model": "opencode-go/glm-5.2",
-      "description": "Edit-capable primary on GLM-5.2. Delegates heavy work to cheap subagents but can edit directly when convenient. Tab-switch alternative to orchestrator."
+      "description": "Edit-capable primary. Delegates heavy work to subagents but can edit directly when convenient. Tab-switch alternative to orchestrator."
     },
     "general": {
       "mode": "subagent",
