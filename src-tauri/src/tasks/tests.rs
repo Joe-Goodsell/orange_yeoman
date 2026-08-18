@@ -137,6 +137,123 @@ fn auto_task_source_hash_uses_file_content() {
     )));
 }
 
+// Non-inline tasks keep whole-file staleness: a whole-file hash mismatch is
+// stale even when the target block is unchanged. This is the behavior
+// is_inline_result_stale refines for inline tasks, whose staleness keys on the
+// raw command line's hash instead.
+#[test]
+fn is_result_stale_whole_file_hash_difference_returns_true() {
+    let file_hash = crate::pipeline::stable_hash(
+        "The value is 450 celsius according to Smith.\n\nThe value is 5 kg.",
+    );
+    assert!(is_result_stale(Some("path"), &file_hash, |_| Ok(
+        "The value is 450 celsius according to Smith.\n\nThe value is 6 kg."
+            .to_string()
+    )));
+}
+
+// --- inline line-granular staleness tests ---
+//
+// is_inline_result_stale re-parses the file and keys staleness on the hash of
+// the raw command line text, so edits to sibling lines in the same block or to
+// other blocks never invalidate an inline command result. Only an edit to the
+// command line itself makes it stale.
+
+// The stable hash of the raw command line text of the first slash command
+// found in the content, mirroring how submit_auto_task stamps line_text_hash.
+fn inline_line_hash(content: &str) -> String {
+    let blocks = crate::pipeline::parse_markdown_blocks(content);
+    for block in blocks.iter().filter(|b| !b.excluded) {
+        if let Some(parsed) = crate::pipeline::parse_slash_command_in_block(block) {
+            return crate::pipeline::stable_hash(&block.text[parsed.line_start..parsed.line_end]);
+        }
+    }
+    panic!("content should contain a slash command");
+}
+
+#[test]
+fn is_inline_result_stale_no_file_path_returns_false() {
+    assert!(!is_inline_result_stale(None, "hash", |_| Ok(
+        "content".to_string()
+    )));
+}
+
+#[test]
+fn is_inline_result_stale_file_missing_returns_true() {
+    assert!(is_inline_result_stale(Some("path"), "hash", |_| Err(())));
+}
+
+// A command line with the same hash still present in the file keeps the result
+// fresh.
+#[test]
+fn is_inline_result_stale_command_line_present_returns_false() {
+    let content = "The value is 450 celsius according to Smith.\n/fact-check amperes are tricky."
+        .to_string();
+    let blocks = crate::pipeline::parse_markdown_blocks(&content);
+    assert_eq!(blocks.len(), 1);
+    let line_hash = inline_line_hash(&content);
+    assert!(!is_inline_result_stale(Some("path"), &line_hash, |_| Ok(
+        content.clone()
+    )));
+}
+
+// When the command line itself is edited, its raw text hash no longer matches
+// any line in the file and the result is stale.
+#[test]
+fn is_inline_result_stale_command_line_edited_returns_true() {
+    let original = "/fact-check amperes are tricky.".to_string();
+    let line_hash = inline_line_hash(&original);
+    let edited = "/fact-check amperes are harder.".to_string();
+    assert!(is_inline_result_stale(Some("path"), &line_hash, |_| Ok(
+        edited.clone()
+    )));
+}
+
+// The key granularity case: an edit to a DIFFERENT block in the same file must
+// not invalidate the target command line's result. The command line's hash
+// still matches, so the result is fresh.
+#[test]
+fn is_inline_result_stale_other_block_edited_returns_false() {
+    let original =
+        "The value is 450 celsius according to Smith.\n/fact-check amperes are tricky.\n\nThe value is 5 kg."
+            .to_string();
+    let blocks = crate::pipeline::parse_markdown_blocks(&original);
+    assert_eq!(blocks.len(), 2);
+    let line_hash = inline_line_hash(&original);
+
+    let edited = "The value is 450 celsius according to Smith.\n/fact-check amperes are tricky.\n\nThe value is 6 kg."
+        .to_string();
+    assert!(!is_inline_result_stale(Some("path"), &line_hash, |_| Ok(
+        edited.clone()
+    )));
+}
+
+// The line-granular case inside a single block: the command line shares its
+// paragraph block with sibling lines. Editing a sibling line leaves the
+// command line untouched, so the result is NOT stale; editing the command line
+// itself makes it stale.
+#[test]
+fn is_inline_result_stale_same_block_sibling_line_edited_returns_false() {
+    let original = "Sibling line one.\n/fact-check amperes are tricky.\nSibling line three."
+        .to_string();
+    let blocks = crate::pipeline::parse_markdown_blocks(&original);
+    assert_eq!(blocks.len(), 1);
+    let line_hash = inline_line_hash(&original);
+
+    let sibling_edited =
+        "Sibling line ONE changed.\n/fact-check amperes are tricky.\nSibling line three."
+            .to_string();
+    assert!(!is_inline_result_stale(Some("path"), &line_hash, |_| Ok(
+        sibling_edited.clone()
+    )));
+
+    let command_edited = "Sibling line one.\n/fact-check amperes are harder.\nSibling line three."
+        .to_string();
+    assert!(is_inline_result_stale(Some("path"), &line_hash, |_| Ok(
+        command_edited.clone()
+    )));
+}
+
 #[test]
 fn task_metadata_serializes_to_camel_case() {
     let metadata = TaskMetadata {
@@ -144,6 +261,9 @@ fn task_metadata_serializes_to_camel_case() {
         file_path: Some("p".to_string()),
         block_hash: "b".to_string(),
         source_hash: "s".to_string(),
+        focus_start: None,
+        focus_end: None,
+        line_text_hash: None,
         trigger: crate::pipeline::Trigger::Automatic,
         status: TaskStatus::Completed,
         stale: false,
@@ -156,6 +276,36 @@ fn task_metadata_serializes_to_camel_case() {
     assert!(json.contains("\"completed\""));
     assert!(!json.contains("file_path"));
     assert!(!json.contains("block_hash"));
+    // The optional focus span and line hash are absent from JSON when None, so
+    // existing frontend consumers that do not know about them stay compatible.
+    assert!(!json.contains("focusStart"));
+    assert!(!json.contains("focusEnd"));
+    assert!(!json.contains("lineTextHash"));
+}
+
+// The inline focus span serializes as camelCase only when present.
+#[test]
+fn task_metadata_focus_span_serializes_camel_case_when_present() {
+    let metadata = TaskMetadata {
+        task_id: "t1".to_string(),
+        file_path: Some("p".to_string()),
+        block_hash: "b".to_string(),
+        source_hash: "s".to_string(),
+        focus_start: Some(10),
+        focus_end: Some(42),
+        line_text_hash: Some("abc123".to_string()),
+        trigger: crate::pipeline::Trigger::Inline,
+        status: TaskStatus::Completed,
+        stale: false,
+        error: None,
+    };
+    let json = serde_json::to_string(&metadata).unwrap();
+    assert!(json.contains("\"focusStart\":10"));
+    assert!(json.contains("\"focusEnd\":42"));
+    assert!(json.contains("\"lineTextHash\":\"abc123\""));
+    assert!(!json.contains("focus_start"));
+    assert!(!json.contains("focus_end"));
+    assert!(!json.contains("line_text_hash"));
 }
 
 #[test]
@@ -224,6 +374,9 @@ fn task_metadata(task_id: &str, trigger: crate::pipeline::Trigger) -> TaskMetada
         file_path: None,
         block_hash: "b".to_string(),
         source_hash: "s".to_string(),
+        focus_start: None,
+        focus_end: None,
+        line_text_hash: None,
         trigger,
         status: TaskStatus::Queued,
         stale: false,
@@ -342,4 +495,112 @@ fn scrub_error_strips_control_chars() {
     let cleaned = scrub_error("error\x00\x01text");
     assert!(!cleaned.contains('\x00'));
     assert!(!cleaned.contains('\x01'));
+}
+
+// --- inline slash-command dispatch tests ---
+//
+// submit_auto_task is a tauri::command and needs a real AppHandle, so the
+// inline dispatch is verified through its pure pieces in the exact order the
+// command wires them: parse the block, build the envelope, derive the task id.
+// The routing contract is covered by the route_block tests below: an inline
+// /ignore or /research command makes submit_auto_task return Ok(None), and an
+// inline /fact-check command is the only dispatch-producing path.
+
+// A paragraph block with a stable hash, matching the pipeline test helper.
+fn command_block(text: &str) -> crate::pipeline::MarkdownBlock {
+    crate::pipeline::MarkdownBlock {
+        kind: crate::pipeline::BlockKind::Paragraph,
+        text: text.to_string(),
+        start: 0,
+        end: text.len(),
+        heading_chain: vec![],
+        excluded: false,
+        block_hash: crate::pipeline::stable_hash(text),
+    }
+}
+
+// An inline /fact-check block parses to a FactCheck command whose focus text
+// is the claim; the envelope carries Trigger::Inline, which is what
+// submit_auto_task stamps on the TaskMetadata.
+#[test]
+fn inline_fact_check_parses_claim_and_inline_trigger() {
+    let block = command_block("/fact-check some claim");
+    let parsed = crate::pipeline::parse_slash_command_in_block(&block)
+        .expect("command should parse");
+    assert_eq!(parsed.command, crate::pipeline::SlashCommand::FactCheck);
+    assert_eq!(parsed.focus_text, "some claim");
+    let envelope =
+        crate::pipeline::build_inline_envelope(&block, &parsed, Some("notes/a.md"));
+    assert_eq!(envelope.trigger, crate::pipeline::Trigger::Inline);
+    assert_eq!(envelope.focus_text, "some claim");
+    assert_eq!(envelope.focus_ref.file.as_deref(), Some("notes/a.md"));
+}
+
+// The inline task id tracks the claim text: two inline /fact-check commands
+// with different claims get distinct ids, so the task store keeps them apart.
+#[test]
+fn inline_fact_check_task_id_distinct_for_different_claims() {
+    let b1 = command_block("/fact-check some claim");
+    let b2 = command_block("/fact-check a different claim");
+    let e1 = crate::pipeline::build_inline_envelope(
+        &b1,
+        &crate::pipeline::parse_slash_command_in_block(&b1).unwrap(),
+        None,
+    );
+    let e2 = crate::pipeline::build_inline_envelope(
+        &b2,
+        &crate::pipeline::parse_slash_command_in_block(&b2).unwrap(),
+        None,
+    );
+    assert_ne!(
+        crate::pipeline::inline_task_id(&e1),
+        crate::pipeline::inline_task_id(&e2)
+    );
+}
+
+// The inline path must not collide with the explicit path: for the same block
+// and claim, inline_task_id and fact_check_task_id / research_task_id produce
+// different ids, so the two dispatch paths never overwrite each other in the
+// task store. The explicit paths themselves are covered by
+// fact_check_task_id_includes_claim_hash and research_task_id_includes_goal_hash.
+#[test]
+fn inline_fact_check_task_id_differs_from_explicit() {
+    let block = command_block("/fact-check some claim");
+    let parsed = crate::pipeline::parse_slash_command_in_block(&block).unwrap();
+    let envelope = crate::pipeline::build_inline_envelope(&block, &parsed, None);
+    let inline_id = crate::pipeline::inline_task_id(&envelope);
+    assert_ne!(
+        inline_id,
+        fact_check_task_id(&block.block_hash, &parsed.focus_text)
+    );
+    assert_ne!(
+        inline_id,
+        research_task_id(&block.block_hash, &parsed.focus_text)
+    );
+}
+
+// An inline /ignore command overrides strong factual signals and routes to
+// Ignore; submit_auto_task returns Ok(None) for that decision (roadmap).
+#[test]
+fn inline_ignore_routes_to_ignore_no_dispatch() {
+    let block = command_block("/ignore\nThe value is 450 celsius according to Smith.");
+    let parsed = crate::pipeline::parse_slash_command_in_block(&block).unwrap();
+    assert_eq!(parsed.command, crate::pipeline::SlashCommand::Ignore);
+    assert_eq!(
+        crate::pipeline::route_block(&block, Some(&parsed)),
+        crate::pipeline::RoutingDecision::Ignore
+    );
+}
+
+// An inline /research command routes to Research; submit_auto_task returns
+// Ok(None) for that decision (roadmap).
+#[test]
+fn inline_research_routes_to_research_no_dispatch() {
+    let block = command_block("/research what happened at the battle of Hastings");
+    let parsed = crate::pipeline::parse_slash_command_in_block(&block).unwrap();
+    assert_eq!(parsed.command, crate::pipeline::SlashCommand::Research);
+    assert_eq!(
+        crate::pipeline::route_block(&block, Some(&parsed)),
+        crate::pipeline::RoutingDecision::Research
+    );
 }

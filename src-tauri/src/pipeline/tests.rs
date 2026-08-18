@@ -137,52 +137,121 @@ fn offsets_slice_to_block_text() {
     }
 }
 
-// A bare "/fact-check" line parses with no argument and an empty remaining
-// selection, since the command line is the whole input.
-#[test]
-fn fact_check_no_argument() {
-    let parsed = parse_slash_command("/fact-check").expect("command should parse");
-    assert_eq!(parsed.command, SlashCommand::FactCheck);
-    assert_eq!(parsed.argument, None);
-    assert_eq!(parsed.remaining_selection, "");
+// --- inline slash command tests ---
+//
+// The v1 model: a command token may appear anywhere in a line, the whole line
+// (token and any trailing selector stripped) is the focus text, and the
+// command line stays in the file. parse_slash_command_in_line scans a single
+// line; parse_slash_command_in_block scans a block's lines in document order
+// and returns the first match.
+
+// A paragraph block with a stable hash, for single-line command tests.
+fn command_block(text: &str) -> MarkdownBlock {
+    let mut block = block_for(text);
+    block.block_hash = stable_hash(text);
+    block
 }
 
+// Command at the start of a line: the token span covers the "/fact-check" run.
 #[test]
-fn research_with_argument() {
-    let parsed = parse_slash_command("/research find more battles").expect("command should parse");
-    assert_eq!(parsed.command, SlashCommand::Research);
-    assert_eq!(parsed.argument, Some("find more battles".to_string()));
-    assert_eq!(parsed.remaining_selection, "");
-}
-
-#[test]
-fn ignore_command() {
-    let parsed = parse_slash_command("/ignore").expect("command should parse");
-    assert_eq!(parsed.command, SlashCommand::Ignore);
-}
-
-// The command line is removed from the selection; the remaining text is
-// preserved exactly.
-#[test]
-fn command_with_following_selection() {
-    let parsed = parse_slash_command("/fact-check\nThe melting point of bismuth is 450 C.")
+fn command_at_line_start() {
+    let parsed = parse_slash_command_in_line("/fact-check amperes are tricky.")
         .expect("command should parse");
     assert_eq!(parsed.command, SlashCommand::FactCheck);
-    assert_eq!(parsed.argument, None);
-    assert_eq!(
-        parsed.remaining_selection,
-        "The melting point of bismuth is 450 C."
-    );
+    assert_eq!(parsed.token_start, 0);
+    assert_eq!(parsed.token_end, "/fact-check".len());
+    assert_eq!(parsed.selector, None);
+}
+
+// Command mid-sentence: the focus text is the whole line with the token
+// stripped and trimmed.
+#[test]
+fn command_mid_sentence_focus_text() {
+    let line = "Question for later /fact-check amperes are tricky.";
+    let parsed = parse_slash_command_in_line(line).expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::FactCheck);
+    assert_eq!(parsed.token_start, 19);
+    assert_eq!(parsed.token_end, 30);
+
+    let block = command_block(line);
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.focus_text, "Question for later  amperes are tricky.");
+}
+
+// Command at the end of a line: the focus text is the lead-in text.
+#[test]
+fn command_at_end_of_line() {
+    let line = "a fact I'm not sure about /fact-check";
+    let parsed = parse_slash_command_in_line(line).expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::FactCheck);
+    assert_eq!(parsed.token_start, 26);
+
+    let block = command_block(line);
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.focus_text, "a fact I'm not sure about");
+}
+
+// First-match rule: only the first registry command on a line triggers; the
+// second token is ordinary text in the focus.
+#[test]
+fn first_match_rule() {
+    let line = "check /research and /ignore now";
+    let parsed = parse_slash_command_in_line(line).expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::Research);
+
+    let block = command_block(line);
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::Research);
+    assert_eq!(parsed.focus_text, "check  and /ignore now");
+}
+
+// Whitespace or line boundaries bound a command token: inflections, file
+// paths, and URL-like paths never match.
+#[test]
+fn whitespace_boundaries() {
+    assert!(parse_slash_command_in_line("/researching").is_none());
+    assert!(parse_slash_command_in_line("src/main.rs").is_none());
+    assert!(parse_slash_command_in_line("path/fact-check").is_none());
+}
+
+// Commands are case-sensitive and lowercase.
+#[test]
+fn command_is_case_sensitive() {
+    assert!(parse_slash_command_in_line("/Fact-Check").is_none());
+}
+
+// Leading whitespace before the command is allowed; the scan finds the token
+// wherever it is.
+#[test]
+fn leading_whitespace_before_command() {
+    let parsed = parse_slash_command_in_line("   /fact-check").expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::FactCheck);
+    assert_eq!(parsed.token_start, 3);
+    assert_eq!(parsed.token_end, 14);
+}
+
+// A trailing selector is recorded raw and excluded from the focus text.
+#[test]
+fn trailing_selector() {
+    let parsed = parse_slash_command_in_line("/research @section").expect("command should parse");
+    assert_eq!(parsed.command, SlashCommand::Research);
+    assert_eq!(parsed.selector, Some("@section"));
+    assert_eq!(parsed.selector_span, Some((10, 18)));
+
+    let block = command_block("go /research @section");
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.selector, Some("@section".to_string()));
+    assert_eq!(parsed.focus_text, "go");
 }
 
 #[test]
 fn no_command_returns_none() {
-    assert!(parse_slash_command("Just a regular note.").is_none());
+    assert!(parse_slash_command_in_line("Just a regular note.").is_none());
 }
 
 #[test]
 fn unknown_command_returns_none() {
-    assert!(parse_slash_command("/unknown thing").is_none());
+    assert!(parse_slash_command_in_line("/unknown thing").is_none());
 }
 
 // Slash-like text inside an excluded block (e.g. a code fence) is never
@@ -203,48 +272,141 @@ fn command_not_in_excluded_block() {
 
 #[test]
 fn command_in_normal_block() {
-    let block = MarkdownBlock {
-        kind: BlockKind::Paragraph,
-        text: "/research expand this".to_string(),
-        start: 0,
-        end: 21,
-        heading_chain: vec![],
-        excluded: false,
-        block_hash: stable_hash("/research expand this"),
-    };
+    let block = command_block("/research expand this");
     let parsed = parse_slash_command_in_block(&block).expect("command should parse");
     assert_eq!(parsed.command, SlashCommand::Research);
-    assert_eq!(parsed.argument, Some("expand this".to_string()));
+    assert_eq!(parsed.focus_text, "expand this");
 }
 
-// Leading whitespace on the command line is ignored.
+// Multiple command lines in one block: the first one in document order wins.
 #[test]
-fn leading_whitespace_before_command() {
-    let parsed = parse_slash_command("   /fact-check").expect("command should parse");
-    assert_eq!(parsed.command, SlashCommand::FactCheck);
-}
-
-// Commands are case-sensitive and lowercase.
-#[test]
-fn command_is_case_sensitive() {
-    assert!(parse_slash_command("/Fact-Check").is_none());
-}
-
-// The command must be a whole word: "/fact-checking" is not "/fact-check".
-#[test]
-fn word_boundary_not_prefix() {
-    assert!(parse_slash_command("/fact-checking now").is_none());
-}
-
-#[test]
-fn research_argument_with_multiple_words() {
-    let parsed = parse_slash_command("/research suggest additional tactics and specific battles")
-        .expect("command should parse");
+fn block_returns_first_command_line() {
+    let text = "plain line\n/research first command\n/ignore second command";
+    let block = command_block(text);
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
     assert_eq!(parsed.command, SlashCommand::Research);
     assert_eq!(
-        parsed.argument,
-        Some("suggest additional tactics and specific battles".to_string())
+        &text[parsed.line_start..parsed.line_end],
+        "/research first command"
     );
+}
+
+// line_start/line_end are block-relative byte offsets that slice back to the
+// exact command line; adding block.start yields file offsets.
+#[test]
+fn offsets_slice_to_command_line() {
+    let input = "First line.\n/research battles\nLast line.";
+    let blocks = parse_markdown_blocks(input);
+    let block = &blocks[0];
+    let parsed = parse_slash_command_in_block(block).expect("command should parse");
+    assert_eq!(
+        &block.text[parsed.line_start..parsed.line_end],
+        "/research battles"
+    );
+    assert_eq!(block.start + parsed.line_start, 12);
+    assert_eq!(block.start + parsed.line_end, 29);
+}
+
+// The parsed struct carries the block's own hash.
+#[test]
+fn parsed_uses_block_hash() {
+    let block = command_block("x /ignore now");
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.block_hash, block.block_hash);
+}
+
+// The v1 inline envelope: scope "line", file-relative focus offsets, schema
+// version 1, and Trigger::Inline.
+#[test]
+fn inline_envelope_fields() {
+    let text = "First line.\n/fact-check amperes are tricky.\nThird line.";
+    let block = MarkdownBlock {
+        kind: BlockKind::Paragraph,
+        text: text.to_string(),
+        start: 100,
+        end: 100 + text.len(),
+        heading_chain: vec![],
+        excluded: false,
+        block_hash: stable_hash(text),
+    };
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    assert_eq!(parsed.line_start, 12);
+    assert_eq!(parsed.line_end, 43);
+    assert_eq!(
+        &block.text[parsed.line_start..parsed.line_end],
+        "/fact-check amperes are tricky."
+    );
+
+    let envelope = build_inline_envelope(&block, &parsed, Some("notes/a.md"));
+    assert_eq!(envelope.command, SlashCommand::FactCheck);
+    assert_eq!(envelope.trigger, Trigger::Inline);
+    assert_eq!(envelope.scope, "line");
+    assert_eq!(envelope.focus_text, "amperes are tricky.");
+    assert_eq!(envelope.selector, None);
+    assert_eq!(envelope.output_schema_version, 1);
+    assert_eq!(envelope.focus_ref.file.as_deref(), Some("notes/a.md"));
+    assert_eq!(envelope.focus_ref.block_hash, block.block_hash);
+    assert_eq!(envelope.focus_ref.start, 112);
+    assert_eq!(envelope.focus_ref.end, 143);
+}
+
+// The envelope serializes with camelCase fields and snake_case command and
+// trigger names.
+#[test]
+fn inline_envelope_serializes_camel_case() {
+    let text = "/fact-check amperes are tricky.";
+    let block = command_block(text);
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    let envelope = build_inline_envelope(&block, &parsed, Some("notes/a.md"));
+    let json = serde_json::to_value(&envelope).expect("envelope serializes");
+    assert_eq!(json["command"], "fact_check");
+    assert_eq!(json["trigger"], "inline");
+    assert_eq!(json["scope"], "line");
+    assert_eq!(json["outputSchemaVersion"], 1);
+    assert_eq!(json["focusText"], "amperes are tricky.");
+    assert_eq!(json["focusRef"]["file"], "notes/a.md");
+    assert_eq!(json["focusRef"]["blockHash"], block.block_hash);
+    assert_eq!(json["focusRef"]["start"], 0);
+    assert_eq!(json["focusRef"]["end"], text.len());
+}
+
+// The task id is deterministic for equal envelopes and a lowercase, non-slashy
+// map key.
+#[test]
+fn inline_task_id_deterministic() {
+    let block = command_block("Question for later /fact-check amperes are tricky.");
+    let parsed = parse_slash_command_in_block(&block).expect("command should parse");
+    let envelope = build_inline_envelope(&block, &parsed, None);
+    let a = inline_task_id(&envelope);
+    let b = inline_task_id(&envelope);
+    assert_eq!(a, b);
+    assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    assert_eq!(a.to_lowercase(), a);
+}
+
+// Distinct focus text yields a distinct task id.
+#[test]
+fn inline_task_id_distinct_for_different_focus() {
+    let b1 = command_block("one /fact-check apples");
+    let b2 = command_block("two /fact-check bananas");
+    let e1 = build_inline_envelope(&b1, &parse_slash_command_in_block(&b1).unwrap(), None);
+    let e2 = build_inline_envelope(&b2, &parse_slash_command_in_block(&b2).unwrap(), None);
+    assert_ne!(inline_task_id(&e1), inline_task_id(&e2));
+}
+
+// The block hash is part of the identity: two envelopes whose command line has
+// the same focus text but whose blocks differ (here, only in a sibling line)
+// must get distinct task ids, so the identical line in two different blocks
+// never collides in the task store.
+#[test]
+fn inline_task_id_distinct_for_same_focus_different_blocks() {
+    let b1 = command_block("sibling line one\n/fact-check apples\nanother line");
+    let b2 = command_block("sibling line two\n/fact-check apples\nanother line");
+    let e1 = build_inline_envelope(&b1, &parse_slash_command_in_block(&b1).unwrap(), None);
+    let e2 = build_inline_envelope(&b2, &parse_slash_command_in_block(&b2).unwrap(), None);
+    assert_eq!(e1.focus_text, e2.focus_text);
+    assert_ne!(e1.focus_ref.block_hash, e2.focus_ref.block_hash);
+    assert_ne!(inline_task_id(&e1), inline_task_id(&e2));
 }
 
 // --- classify_block signal tests ---
@@ -428,12 +590,15 @@ fn block_for(text: &str) -> MarkdownBlock {
     }
 }
 
-// A parsed slash command with no argument and empty remaining selection.
+// A parsed slash command for routing tests: no focus text, no selector.
 fn command_for(command: SlashCommand) -> ParsedSlashCommand {
     ParsedSlashCommand {
         command,
-        argument: None,
-        remaining_selection: String::new(),
+        focus_text: String::new(),
+        selector: None,
+        line_start: 0,
+        line_end: 0,
+        block_hash: String::new(),
     }
 }
 
