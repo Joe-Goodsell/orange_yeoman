@@ -20,7 +20,7 @@
     type DetectedCommand,
   } from "./slashCommands";
   import { slashCommandAutocomplete } from "./slashCommandAutocomplete";
-  import type { AgentFeedback } from "./types";
+  import type { AgentFeedback, SourceRange } from "./types";
 
   // Plain text-only editor for the initial build.
   // Syntax highlighting, Vim keybindings, and markdown rendering are roadmap
@@ -128,6 +128,15 @@
     if (dispatchedKeys.has(key)) return false;
 
     dispatchedKeys.add(key);
+    // A command can only be detected in a paragraph when a file is open: the
+    // editor document is populated from openFileContent, which is set together
+    // with openFilePath, so the non-null assertion is safe here.
+    const range: SourceRange = {
+      file: project.openFilePath!,
+      from: paragraph.startOffset,
+      to: paragraph.startOffset + paragraph.text.length,
+    };
+    project.dispatchMockFeedback(detected, range);
     submitBlock(project.openFilePath, paragraph.text).catch((e) => {
       project.error = String(e);
     });
@@ -153,6 +162,16 @@
             if (u.docChanged && !isRemote) {
               project.dirty =
                 u.state.doc.toString() !== project.openFileContent;
+              // Keep feedback ranges attached to the text they refer to as
+              // the user types. Local edits only; remote edits replace the
+              // whole document and stale-mark feedback instead.
+              project.mapFeedbackRanges(
+                u.changes.mapPos.bind(u.changes) as (
+                  pos: number,
+                  assoc: -1 | 1
+                ) => number,
+                project.openFilePath
+              );
             }
             // Snapshot the selection so the agent pane can link cards whose
             // source range overlaps the current selection. A collapsed
@@ -244,27 +263,22 @@
     }
   });
 
-  // Rebuild the range decorations whenever feedback or the open file (path or
-  // content snapshot) changes. Reacting to the content snapshot means an
-  // external edit or file reopen rebuilds decorations against the current
-  // document instead of leaving the previous set mapped into a shrunken
-  // document. The doc-sync effect above runs first and keeps the editor
-  // document equal to the snapshot; feedback ranges were anchored to the
-  // snapshot, so bounding by the smaller of the two lengths prunes ranges
-  // that no longer fit.
+  // Rebuild the range decorations whenever feedback or the open file changes.
+  // The effect still re-runs on project.openFilePath changes (file reopen) and
+  // project.feedback changes (range mapping / new items / status transitions).
+  // Local edits map feedback ranges through the change set in the update
+  // listener, and external edits sync the whole document via the doc-sync
+  // effect above, so the current document length is the correct bound: the
+  // old Math.min with the content snapshot clipped live ranges after local
+  // typing and dropped the decoration we just added.
   $effect(() => {
     const v = view;
     if (!v) return;
     const file = project.openFilePath;
     const items = project.feedback;
-    const content = project.openFileContent;
     v.dispatch({
       effects: setFeedbackEffect.of(
-        buildFeedbackDecorations(
-          items,
-          file,
-          Math.min(v.state.doc.length, content.length)
-        )
+        buildFeedbackDecorations(items, file, v.state.doc.length)
       ),
     });
   });
