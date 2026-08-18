@@ -488,8 +488,8 @@ pub(crate) async fn submit_auto_task(
                 crate::pipeline::SlashCommand::Ignore => "/ignore",
             };
             let mut message = name.to_string();
-            if let Some(argument) = &parsed.argument {
-                let truncated: String = argument.chars().take(80).collect();
+            if !parsed.focus_text.is_empty() {
+                let truncated: String = parsed.focus_text.chars().take(80).collect();
                 message.push(' ');
                 message.push_str(&truncated);
             }
