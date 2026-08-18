@@ -129,12 +129,15 @@
     const key = `${detected.name}:${hashText(paragraph.text)}`;
     if (dispatchedKeys.has(key)) return false;
 
+    // No dispatch without an open file: the editor mounts whenever a project
+    // root is selected, so the document can hold a complete command with no
+    // backing file. Returning false lets CodeMirror run the default Enter
+    // behavior instead.
+    if (!project.openFilePath) return false;
+
     dispatchedKeys.add(key);
-    // A command can only be detected in a paragraph when a file is open: the
-    // editor document is populated from openFileContent, which is set together
-    // with openFilePath, so the non-null assertion is safe here.
     const range: SourceRange = {
-      file: project.openFilePath!,
+      file: project.openFilePath,
       from: paragraph.startOffset,
       to: paragraph.startOffset + paragraph.text.length,
     };
