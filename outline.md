@@ -24,4 +24,5 @@ The central goal of this app is to provide real-time and async feedback on your 
 * Vim keybindings in the editor (high priority).
 * Syntax highlighting in the editor (high priority).
 * Markdown rendering (render .md as formatted output, live preview).
+* Better contextual slash commands dropdown (rank and filter commands by surrounding context).
 * iOS app, and possibly Android/Windows/Web apps later on.

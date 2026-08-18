@@ -122,7 +122,7 @@ fn is_result_stale_hash_differs_returns_true() {
     )));
 }
 
-// Documents why submit_auto_task hashes the whole file, not the block text:
+// Documents why submit_block hashes the whole file, not the block text:
 // the stale check re-reads the file and hashes its content, so only a
 // whole-file hash keeps the result fresh.
 #[test]
@@ -160,7 +160,7 @@ fn is_result_stale_whole_file_hash_difference_returns_true() {
 // command line itself makes it stale.
 
 // The stable hash of the raw command line text of the first slash command
-// found in the content, mirroring how submit_auto_task stamps line_text_hash.
+// found in the content, mirroring how submit_block stamps line_text_hash.
 fn inline_line_hash(content: &str) -> String {
     let blocks = crate::pipeline::parse_markdown_blocks(content);
     for block in blocks.iter().filter(|b| !b.excluded) {
@@ -499,11 +499,11 @@ fn scrub_error_strips_control_chars() {
 
 // --- inline slash-command dispatch tests ---
 //
-// submit_auto_task is a tauri::command and needs a real AppHandle, so the
+// submit_block is a tauri::command and needs a real AppHandle, so the
 // inline dispatch is verified through its pure pieces in the exact order the
 // command wires them: parse the block, build the envelope, derive the task id.
 // The routing contract is covered by the route_block tests below: an inline
-// /ignore or /research command makes submit_auto_task return Ok(None), and an
+// /ignore or /research command makes submit_block return Ok(None), and an
 // inline /fact-check command is the only dispatch-producing path.
 
 // A paragraph block with a stable hash, matching the pipeline test helper.
@@ -521,7 +521,7 @@ fn command_block(text: &str) -> crate::pipeline::MarkdownBlock {
 
 // An inline /fact-check block parses to a FactCheck command whose focus text
 // is the claim; the envelope carries Trigger::Inline, which is what
-// submit_auto_task stamps on the TaskMetadata.
+// submit_block stamps on the TaskMetadata.
 #[test]
 fn inline_fact_check_parses_claim_and_inline_trigger() {
     let block = command_block("/fact-check some claim");
@@ -580,7 +580,7 @@ fn inline_fact_check_task_id_differs_from_explicit() {
 }
 
 // An inline /ignore command overrides strong factual signals and routes to
-// Ignore; submit_auto_task returns Ok(None) for that decision (roadmap).
+// Ignore; submit_block returns Ok(None) for that decision (roadmap).
 #[test]
 fn inline_ignore_routes_to_ignore_no_dispatch() {
     let block = command_block("/ignore\nThe value is 450 celsius according to Smith.");
@@ -592,7 +592,7 @@ fn inline_ignore_routes_to_ignore_no_dispatch() {
     );
 }
 
-// An inline /research command routes to Research; submit_auto_task returns
+// An inline /research command routes to Research; submit_block returns
 // Ok(None) for that decision (roadmap).
 #[test]
 fn inline_research_routes_to_research_no_dispatch() {

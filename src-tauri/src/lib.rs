@@ -39,7 +39,7 @@ pub fn run() {
             filesystem::list_dir,
             filesystem::read_text_file,
             llm::complete_llm,
-            tasks::submit_auto_task,
+            tasks::submit_block,
             tasks::submit_fact_check,
             tasks::submit_research,
             tasks::get_task_status,
