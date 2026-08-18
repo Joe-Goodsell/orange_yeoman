@@ -91,7 +91,7 @@ pub(crate) fn task_id_from_identity(
         crate::pipeline::Trigger::Research => "research",
         // The inline-trigger variants never produce ids through this identity
         // form; inline dispatch uses pipeline::inline_task_id (see
-        // submit_auto_task). These arms only keep the match exhaustive.
+        // submit_block). These arms only keep the match exhaustive.
         crate::pipeline::Trigger::Inline => "inline",
         crate::pipeline::Trigger::CommandLine => "command_line",
     };
@@ -451,14 +451,15 @@ pub(crate) fn dispatch_task(
 // as `State<'_, Arc<TaskStore>>` because dispatch_task owns an Arc<TaskStore>;
 // the Arc is cloned from the managed state and handed to the spawned task.
 
-/// Process a block of markdown automatically: parse, classify, route, and
-/// dispatch. An inline /fact-check command dispatches a fact-check task with
-/// the Inline trigger. A needs-extraction block dispatches an extraction task.
-/// Inline /research and /ignore are recognized but not dispatched yet
-/// (roadmap), and Skip decisions do nothing. Returns the new task id, or None
-/// when no task was dispatched.
+/// Process a block of markdown: parse, classify, route, and dispatch. The
+/// routing decision determines the action: an inline /fact-check command
+/// dispatches a fact-check task with the Inline trigger; a needs-extraction
+/// block dispatches an extraction task. Inline /research and /ignore are
+/// recognized but not dispatched yet (roadmap), and Skip decisions do nothing.
+/// Callers include both the slash-command path and future automatic paths.
+/// Returns the new task id, or None when no task was dispatched.
 #[tauri::command]
-pub(crate) async fn submit_auto_task(
+pub(crate) async fn submit_block(
     app: AppHandle,
     store: State<'_, Arc<TaskStore>>,
     llm_state: State<'_, crate::llm::LlmState>,
@@ -467,7 +468,16 @@ pub(crate) async fn submit_auto_task(
     block_text: String,
 ) -> Result<Option<String>, String> {
     let blocks = crate::pipeline::parse_markdown_blocks(&block_text);
-    let Some(block) = blocks.into_iter().find(|b| !b.excluded) else {
+    // Prefer the first non-excluded block that contains a slash command so an
+    // inline command after a heading/list/etc. is not silently dropped; fall
+    // back to the first non-excluded block when no block has a command (the
+    // automatic path).
+    let block = blocks
+        .iter()
+        .filter(|b| !b.excluded)
+        .find(|b| crate::pipeline::parse_slash_command_in_block(b).is_some())
+        .or_else(|| blocks.iter().find(|b| !b.excluded));
+    let Some(block) = block else {
         return Ok(None);
     };
 

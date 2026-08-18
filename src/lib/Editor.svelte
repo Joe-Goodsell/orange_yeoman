@@ -2,14 +2,24 @@
   import { onMount, onDestroy } from "svelte";
   import {
     EditorState,
+    Prec,
     RangeSet,
     RangeSetBuilder,
     StateEffect,
     StateField,
     Transaction,
   } from "@codemirror/state";
-  import { Decoration, EditorView } from "@codemirror/view";
+  import { Decoration, EditorView, keymap } from "@codemirror/view";
+  import { completionStatus } from "@codemirror/autocomplete";
   import { project } from "./stores/project.svelte";
+  import { submitBlock } from "./tauri";
+  import {
+    detectSlashCommandInLine,
+    hashText,
+    paragraphAround,
+    type DetectedCommand,
+  } from "./slashCommands";
+  import { slashCommandAutocomplete } from "./slashCommandAutocomplete";
   import type { AgentFeedback } from "./types";
 
   // Plain text-only editor for the initial build.
@@ -76,6 +86,54 @@
       : ""
   );
 
+  // --- Slash-command detection and dispatch ---
+  //
+  // Detection and dispatch are deliberately separated. Dispatch happens only
+  // when the user presses Enter with a complete bounded command in the cursor
+  // paragraph, and only once per (command, paragraph-content) pair. The model
+  // API call must fire ONLY on Enter, so typing alone never triggers it.
+  // Dedup keys for already-dispatched commands. Cleared when the open file
+  // changes so switching files never blocks a later dispatch.
+  const dispatchedKeys = new Set<string>();
+
+  // Scan a paragraph's lines in document order and return the first complete
+  // bounded command, mirroring Rust parse_slash_command_in_block.
+  function scanParagraphForCommand(text: string): DetectedCommand | null {
+    for (const line of text.split("\n")) {
+      const found = detectSlashCommandInLine(line);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // Enter key handler: dispatch a complete bounded command in the cursor
+  // paragraph. Returns false so CodeMirror still performs the default Enter
+  // behavior (accept a completion when the popup is open, insert a newline
+  // otherwise); the IPC call is a fire-and-forget side effect.
+  function onEnterDispatch(view: EditorView): boolean {
+    // With the autocompletion popup open, Enter must accept the completion,
+    // not dispatch. The popup closes by itself once the command word is
+    // complete and bounded, so by the time a real dispatch can happen this
+    // check is false.
+    if (completionStatus(view.state) !== null) return false;
+
+    const paragraph = paragraphAround(
+      view.state.doc.toString(),
+      view.state.selection.main.from
+    );
+    const detected = scanParagraphForCommand(paragraph.text);
+    if (!detected) return false;
+
+    const key = `${detected.name}:${hashText(paragraph.text)}`;
+    if (dispatchedKeys.has(key)) return false;
+
+    dispatchedKeys.add(key);
+    submitBlock(project.openFilePath, paragraph.text).catch((e) => {
+      project.error = String(e);
+    });
+    return false;
+  }
+
   onMount(() => {
     view = new EditorView({
       state: EditorState.create({
@@ -83,15 +141,18 @@
         extensions: [
           EditorView.lineWrapping,
           feedbackField,
+          slashCommandAutocomplete(),
+          // Enter dispatches a complete bounded slash command as a side
+          // effect; the highest precedence ensures it runs before both the
+          // completion keymap and the default newline insertion.
+          Prec.highest(keymap.of([{ key: "Enter", run: onEnterDispatch }])),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged) {
-              const isRemote = u.transactions.some((tr) =>
-                tr.annotation(Transaction.remote)
-              );
-              if (!isRemote) {
-                project.dirty =
-                  u.state.doc.toString() !== project.openFileContent;
-              }
+            const isRemote = u.transactions.some((tr) =>
+              tr.annotation(Transaction.remote)
+            );
+            if (u.docChanged && !isRemote) {
+              project.dirty =
+                u.state.doc.toString() !== project.openFileContent;
             }
             // Snapshot the selection so the agent pane can link cards whose
             // source range overlaps the current selection. A collapsed
@@ -167,6 +228,9 @@
       // the same feedback id.
       project.setEditorSelection(null);
       lastFocusedId = null;
+      // Slash-command dispatch state is per-file: a paragraph hash in the new
+      // file must never be blocked by a dispatch that happened in the old one.
+      dispatchedKeys.clear();
     }
     if (view && view.state.doc.toString() !== content) {
       view.dispatch({

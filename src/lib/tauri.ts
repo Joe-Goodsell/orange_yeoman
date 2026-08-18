@@ -81,15 +81,15 @@ export async function completeLlm(request: LlmRequest): Promise<LlmResponse> {
 }
 
 // Task submission and status commands. These wire the pipeline to the task
-// store in Rust. Auto submissions may return null when routing decides the
+// store in Rust. Block submissions may return null when routing decides the
 // block needs no work; explicit fact-check and research submissions always
 // return a task id.
 
-export async function submitAutoTask(
+export async function submitBlock(
   filePath: string | null,
   blockText: string,
 ): Promise<string | null> {
-  return invoke<string | null>("submit_auto_task", { filePath, blockText });
+  return invoke<string | null>("submit_block", { filePath, blockText });
 }
 
 export async function submitFactCheck(
