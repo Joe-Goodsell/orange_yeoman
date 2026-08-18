@@ -99,8 +99,10 @@
       <h3 class="config-title">Config</h3>
       {#if project.configError}
         <p class="config-error">Config error: {project.configError}</p>
-      {:else}
+      {:else if project.configStatus.global_loaded || project.configStatus.project_loaded}
         <p class="config-ok">Config loaded</p>
+      {:else}
+        <p class="config-ok">Defaults active</p>
       {/if}
       <p class="config-line">
         Small model: <span class="mono">{project.configStatus.small_model}</span>
