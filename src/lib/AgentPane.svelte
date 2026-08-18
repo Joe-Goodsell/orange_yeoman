@@ -118,6 +118,9 @@
           none
         {/if}
       </p>
+      <p class="config-line">
+        Debug: {project.configStatus.debug ? "on" : "off"}
+      </p>
       <p class="config-meta">
         Global: {project.configStatus.global_loaded ? "loaded" : "absent"}
         &middot; Project:
