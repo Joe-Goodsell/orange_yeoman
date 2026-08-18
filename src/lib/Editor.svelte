@@ -20,11 +20,13 @@
     type DetectedCommand,
   } from "./slashCommands";
   import { slashCommandAutocomplete } from "./slashCommandAutocomplete";
+  import { markdownHighlight } from "./markdownHighlight";
   import type { AgentFeedback } from "./types";
 
-  // Plain text-only editor for the initial build.
-  // Syntax highlighting, Vim keybindings, and markdown rendering are roadmap
-  // features (see outline.md) and are intentionally NOT wired here.
+  // Plain text-only editor for the initial build. Markdown syntax highlighting
+  // (token coloring only, via markdownHighlight) is wired below; markdown
+  // rendering and Vim keybindings remain roadmap features (see outline.md)
+  // and are intentionally NOT wired here.
   let host: HTMLDivElement;
   // `view` is $state so the effects below re-run once the view exists.
   let view = $state<EditorView | undefined>(undefined);
@@ -140,6 +142,9 @@
         doc: "",
         extensions: [
           EditorView.lineWrapping,
+          // Markdown syntax highlighting, placed early so feedback
+          // decorations (background overlays) layer on top of it.
+          markdownHighlight(),
           feedbackField,
           slashCommandAutocomplete(),
           // Enter dispatches a complete bounded slash command as a side
