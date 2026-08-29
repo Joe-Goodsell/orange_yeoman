@@ -10,8 +10,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const DEFAULT_SMALL_MODEL: &str = "deepseek-v4-flash";
-const DEFAULT_LARGE_MODEL: &str = "openai-codex-5.6";
 pub(crate) const CONFIG_FILE_NAME: &str = ".orange-yeoman.json";
 
 // JSON shape of a config file (global or per-repository). API key values live
@@ -31,8 +29,9 @@ struct ConfigFile {
 #[derive(Clone, Deserialize, Serialize)]
 struct ModelsConfig {
     // Field-level defaults are empty strings. An absent field is a "not
-    // supplied" sentinel that apply_file skips, so built-in defaults and
-    // earlier merge layers survive a partial models object.
+    // supplied" sentinel that apply_file skips, so earlier merge layers
+    // survive a partial models object. Models are never defaulted: an unset
+    // model stays empty until a config file supplies it.
     #[serde(default)]
     small: String,
     #[serde(default)]
@@ -42,8 +41,8 @@ struct ModelsConfig {
 impl Default for ModelsConfig {
     fn default() -> Self {
         ModelsConfig {
-            small: DEFAULT_SMALL_MODEL.to_string(),
-            large: DEFAULT_LARGE_MODEL.to_string(),
+            small: String::new(),
+            large: String::new(),
         }
     }
 }
@@ -77,8 +76,8 @@ impl Default for MergedConfig {
     fn default() -> Self {
         MergedConfig {
             api_keys: HashMap::new(),
-            small_model: DEFAULT_SMALL_MODEL.to_string(),
-            large_model: DEFAULT_LARGE_MODEL.to_string(),
+            small_model: String::new(),
+            large_model: String::new(),
             global_loaded: false,
             project_loaded: false,
             project_path: None,
@@ -116,21 +115,21 @@ pub(crate) struct ConfigState {
 
 impl ConfigState {
     /// Current small model id from the merged config.
-    /// Falls back to the built-in default when the lock is poisoned.
+    /// Falls back to an empty string when the lock is poisoned.
     pub(crate) fn small_model(&self) -> String {
         self.inner
             .lock()
             .map(|guard| guard.small_model.clone())
-            .unwrap_or_else(|_| DEFAULT_SMALL_MODEL.to_string())
+            .unwrap_or_else(|_| String::new())
     }
 
     /// Current large model id from the merged config.
-    /// Falls back to the built-in default when the lock is poisoned.
+    /// Falls back to an empty string when the lock is poisoned.
     pub(crate) fn large_model(&self) -> String {
         self.inner
             .lock()
             .map(|guard| guard.large_model.clone())
-            .unwrap_or_else(|_| DEFAULT_LARGE_MODEL.to_string())
+            .unwrap_or_else(|_| String::new())
     }
 
     /// Current debug flag from the merged config. Debug events are emitted
@@ -181,7 +180,7 @@ fn read_config_file(path: &Path) -> Result<Option<ConfigFile>, String> {
 
 // Apply one config file onto the merged config. Later files override earlier
 // ones by key. API keys are inserted or replaced per provider and are never
-// cleared by omission. Empty model names are ignored so built-in defaults
+// cleared by omission. Empty model names are ignored so earlier merge layers
 // survive.
 fn apply_file(merged: &mut MergedConfig, file: &ConfigFile) {
     for (provider, value) in &file.api_keys {
@@ -198,7 +197,7 @@ fn apply_file(merged: &mut MergedConfig, file: &ConfigFile) {
     }
 }
 
-// Compute the merged config: built-in defaults, then the global config, then
+// Compute the merged config: empty defaults, then the global config, then
 // the repository config. Errors are collected into the status; loading always
 // continues with the last valid/default values.
 fn compute_merged(project_root: Option<&Path>) -> MergedConfig {
@@ -276,6 +275,123 @@ pub(crate) fn load_project_config(
 ) -> Result<ConfigStatus, String> {
     let root_path = root.as_deref().map(PathBuf::from);
     Ok(reload_config_state(&state, root_path.as_deref()))
+}
+
+// Validate two configured model strings against the available-models union
+// fetched from a provider. Returns one message per problem; an empty result
+// means both models are valid. The available list is sorted and comma-joined
+// in each message. This function is pure so the message format is testable
+// without network I/O.
+fn validate_model_strings(small: &str, large: &str, available: &[String]) -> Vec<String> {
+    let mut sorted: Vec<&str> = available.iter().map(String::as_str).collect();
+    sorted.sort();
+    sorted.dedup();
+    let list = if sorted.is_empty() {
+        "(none)".to_string()
+    } else {
+        sorted.join(", ")
+    };
+
+    let mut messages = Vec::new();
+    if small.is_empty() {
+        messages.push("No small model configured".to_string());
+    } else if !sorted.contains(&small) {
+        messages.push(format!("Invalid model {small}. Available models: {list}"));
+    }
+    if large.is_empty() {
+        messages.push("No large model configured".to_string());
+    } else if !sorted.contains(&large) {
+        messages.push(format!("Invalid model {large}. Available models: {list}"));
+    }
+    messages
+}
+
+// Validate the configured small and large model strings against each
+// configured provider's /models endpoint. The config is snapshotted and the
+// lock is dropped before any network I/O. Returns the current status when
+// both models are valid; otherwise returns a user-facing error string. Each
+// provider fetch failure is logged to stderr for developers only; the user
+// message stays focused on model validity.
+#[tauri::command]
+pub(crate) async fn validate_models(
+    state: tauri::State<'_, ConfigState>,
+) -> Result<ConfigStatus, String> {
+    // Snapshot the config under the lock, then drop the guard before network
+    // I/O. A poisoned lock is a hard error here: validation needs real values.
+    let (api_keys, small, large, snapshot) = {
+        let guard = match state.inner.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err("config state lock is poisoned".to_string()),
+        };
+        let snapshot = MergedConfig {
+            api_keys: guard.api_keys.clone(),
+            small_model: guard.small_model.clone(),
+            large_model: guard.large_model.clone(),
+            global_loaded: guard.global_loaded,
+            project_loaded: guard.project_loaded,
+            project_path: guard.project_path.clone(),
+            error: guard.error.clone(),
+            debug: guard.debug,
+        };
+        (
+            guard.api_keys.clone(),
+            guard.small_model.clone(),
+            guard.large_model.clone(),
+            snapshot,
+        )
+    };
+
+    let configured: Vec<(&String, &String)> = api_keys
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .collect();
+
+    if configured.is_empty() {
+        let message = "No configured providers available to validate models".to_string();
+        eprintln!("[validate_models] {message}");
+        return Err(message);
+    }
+
+    // Query every configured provider. Successful providers contribute their
+    // model ids to the union; failed providers log to stderr only.
+    let mut union: Vec<String> = Vec::new();
+    let mut successes = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (provider, key) in configured {
+        match crate::llm::fetch_available_models(provider, key).await {
+            Ok(ids) => {
+                successes += 1;
+                union.extend(ids);
+            }
+            Err(e) => {
+                eprintln!("[validate_models] provider {provider} fetch failed: {e}");
+                failures.push(format!("provider {provider}: {e}"));
+            }
+        }
+    }
+    union.sort();
+    union.dedup();
+
+    if successes == 0 {
+        // No provider answered at all. There is no validity signal, so the
+        // failure details are the only useful content for the user.
+        let mut message = "All configured providers failed to validate models".to_string();
+        if !failures.is_empty() {
+            message.push_str("; ");
+            message.push_str(&failures.join("; "));
+        }
+        eprintln!("[validate_models] {message}");
+        return Err(message);
+    }
+
+    let messages = validate_model_strings(&small, &large, &union);
+    if !messages.is_empty() {
+        let joined = messages.join("; ");
+        eprintln!("[validate_models] {joined}");
+        return Err(joined);
+    }
+
+    Ok(ConfigStatus::from(&snapshot))
 }
 
 #[cfg(test)]
