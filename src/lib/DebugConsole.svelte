@@ -1,8 +1,19 @@
 <script lang="ts">
-  // Bottom console showing raw debug events emitted by the Rust core when the
-  // `debug` config flag is on. Newest events appear at the bottom.
+  // Bottom console showing debug events emitted by the Rust core. Error and
+  // warning events always arrive; info and below arrive when the `debug`
+  // config flag is on. Newest events appear at the bottom. A level filter row
+  // controls which levels render.
   import { tick } from "svelte";
   import { debug } from "$lib/stores/debug.svelte";
+
+  type Level = "error" | "warn" | "info" | "debug" | "trace";
+
+  const LEVELS: Level[] = ["error", "warn", "info", "debug", "trace"];
+  let activeLevels = $state<Set<Level>>(new Set(LEVELS));
+
+  const visibleEvents = $derived(
+    debug.events.filter((e) => activeLevels.has(e.level)),
+  );
 
   let container = $state<HTMLDivElement | undefined>(undefined);
 
@@ -15,6 +26,16 @@
       el.scrollTop = el.scrollHeight;
     });
   });
+
+  function toggleLevel(level: Level) {
+    const next = new Set(activeLevels);
+    if (next.has(level)) {
+      next.delete(level);
+    } else {
+      next.add(level);
+    }
+    activeLevels = next;
+  }
 
   function fmtTime(ts: number): string {
     const d = new Date(ts);
@@ -31,16 +52,29 @@
       Clear
     </button>
   </header>
+  <div class="filters">
+    {#each LEVELS as level (level)}
+      <button
+        class="lvl-btn {level} {activeLevels.has(level) ? 'on' : 'off'}"
+        type="button"
+        onclick={() => toggleLevel(level)}
+      >
+        {level}
+      </button>
+    {/each}
+  </div>
   <div class="list" bind:this={container}>
-    {#if debug.events.length === 0}
+    {#if visibleEvents.length === 0}
       <p class="empty">
-        No debug events. Set "debug": true in .orange-yeoman.json.
+        No debug events. Error and warning events always appear; info and below
+        appear when "debug": true is set in .orange-yeoman.json.
       </p>
     {:else}
-      {#each [...debug.events].reverse() as e (e.id)}
+      {#each [...visibleEvents].reverse() as e (e.id)}
         <div class="row">
           <span class="time">{fmtTime(e.ts)}</span>
           <span class="badge {e.category}">{e.category}</span>
+          <span class="lvl {e.level}">{e.level}</span>
           <span class="msg" title={e.message}>{e.message}</span>
         </div>
       {/each}
@@ -90,6 +124,50 @@
 
   .clear-btn:hover {
     background-color: rgba(128, 128, 128, 0.15);
+  }
+
+  .filters {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 4px;
+    padding: 4px 8px;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  }
+
+  .lvl-btn {
+    font-size: 10px;
+    padding: 1px 7px;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.45;
+  }
+
+  .lvl-btn.on {
+    opacity: 1;
+  }
+
+  .lvl-btn.error.on {
+    background: rgba(200, 70, 70, 0.3);
+    color: rgba(240, 140, 140, 0.95);
+  }
+
+  .lvl-btn.warn.on {
+    background: rgba(210, 140, 60, 0.3);
+    color: rgba(240, 190, 120, 0.95);
+  }
+
+  .lvl-btn.info.on {
+    background: rgba(90, 130, 200, 0.3);
+    color: rgba(150, 180, 240, 0.95);
+  }
+
+  .lvl-btn.debug.on,
+  .lvl-btn.trace.on {
+    background: rgba(140, 140, 140, 0.25);
+    color: rgba(190, 190, 190, 0.9);
   }
 
   .list {
@@ -149,6 +227,37 @@
   .badge.watcher {
     background: rgba(200, 160, 90, 0.22);
     color: rgba(220, 190, 130, 0.95);
+  }
+
+  .lvl {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0 5px;
+    border-radius: 3px;
+  }
+
+  .lvl.error {
+    background: rgba(200, 70, 70, 0.3);
+    color: rgba(240, 140, 140, 0.95);
+  }
+
+  .lvl.warn {
+    background: rgba(210, 140, 60, 0.3);
+    color: rgba(240, 190, 120, 0.95);
+  }
+
+  .lvl.info {
+    background: rgba(90, 130, 200, 0.3);
+    color: rgba(150, 180, 240, 0.95);
+  }
+
+  .lvl.debug,
+  .lvl.trace {
+    background: rgba(140, 140, 140, 0.25);
+    color: rgba(190, 190, 190, 0.9);
   }
 
   .msg {

@@ -133,10 +133,13 @@ impl ConfigState {
     }
 
     /// Current debug flag from the merged config. Debug events are emitted
-    /// only when this is true. Falls back to true (enabled) when the lock is
-    /// poisoned.
+    /// only when this is true. Recovers the stored value when the lock is
+    /// poisoned instead of failing open.
     pub(crate) fn debug(&self) -> bool {
-        self.inner.lock().map(|m| m.debug).unwrap_or(true)
+        self.inner
+            .lock()
+            .map(|m| m.debug)
+            .unwrap_or_else(|e| e.into_inner().debug)
     }
 }
 

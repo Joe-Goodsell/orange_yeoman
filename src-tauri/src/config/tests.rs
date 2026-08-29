@@ -185,10 +185,11 @@ fn config_status_carries_merged_debug_true() {
     assert_eq!(status.debug, true);
 }
 
-// A poisoned lock must fall back to true: debug events stay enabled rather
-// than silently disabled after a panic while the lock is held.
+// A poisoned lock must fail closed: the stored debug value is read from the
+// recovered guard, so debug:false stays disabled after a panic while the lock
+// is held.
 #[test]
-fn poisoned_lock_debug_falls_back_to_true() {
+fn poisoned_lock_debug_fails_closed() {
     let state = ConfigState::default();
     {
         let mut guard = state.inner.lock().expect("config lock");
@@ -201,5 +202,5 @@ fn poisoned_lock_debug_falls_back_to_true() {
     });
     assert!(result.is_err(), "catch_unwind must observe the panic");
 
-    assert_eq!(state.debug(), true);
+    assert_eq!(state.debug(), false);
 }

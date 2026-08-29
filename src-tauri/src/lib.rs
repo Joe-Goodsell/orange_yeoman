@@ -5,11 +5,11 @@
 // "structure" (create/remove/rename) or "content" (.md data modify).
 
 mod config;
-mod debug;
 mod filesystem;
 mod llm;
 mod pipeline;
 mod tasks;
+mod telemetry;
 mod watcher;
 
 use std::sync::Arc;
@@ -19,6 +19,10 @@ pub use filesystem::FileEntry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize the tracing subscriber registry before any instrumentation
+    // runs. The debug-event layer no-ops for IPC until set_app_handle fills
+    // the handle in setup; stderr logging works immediately.
+    telemetry::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -31,6 +35,9 @@ pub fn run() {
             // global config. No config file is created; missing files are valid.
             // Any error is stored in status and the app continues.
             config::reload_config_state(&app.state::<config::ConfigState>(), None);
+            // Populate the telemetry layer's app handle so debug://event IPC
+            // emission works from here on.
+            telemetry::set_app_handle(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

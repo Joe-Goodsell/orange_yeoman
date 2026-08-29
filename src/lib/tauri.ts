@@ -59,16 +59,22 @@ export function onConfigChanged(cb: (s: ConfigStatus) => void): Promise<Unlisten
   return listen<ConfigStatus>("config://changed", (event) => cb(event.payload));
 }
 
-// Emitted by Rust when the `debug` config flag is true, on the
-// "debug://event" channel. Categories include "slash_command",
-// "llm_call", and "watcher". Emission is gated in Rust, so no debug
-// IPC traffic arrives when debug is false.
+// Emitted by Rust on the "debug://event" channel. Error and warning events
+// always arrive; info and below arrive only when the `debug` config flag is
+// true. The payload carries a `level` and a Rust-stamped `ts` (ms since UNIX
+// epoch); the frontend does not guess the timestamp.
 export function onDebugEvent(cb: (e: DebugEvent) => void): Promise<UnlistenFn> {
-  return listen<{ category: string; message: string }>("debug://event", (event) => {
+  return listen<{
+    category: string;
+    message: string;
+    level: "error" | "warn" | "info" | "debug" | "trace";
+    ts: number;
+  }>("debug://event", (event) => {
     cb({
       category: event.payload.category,
       message: event.payload.message,
-      ts: Date.now(),
+      level: event.payload.level,
+      ts: event.payload.ts,
     });
   });
 }

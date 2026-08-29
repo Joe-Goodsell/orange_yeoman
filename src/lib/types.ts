@@ -23,11 +23,13 @@ export interface ConfigStatus {
   debug: boolean;
 }
 
-// Payload emitted by Rust on the "debug://event" channel when the `debug`
-// config flag is true. `ts` is stamped on the frontend at receive time.
+// Payload emitted by Rust on the "debug://event" channel. Error and warning
+// events always arrive; info and below arrive only when the `debug` config
+// flag is true. `ts` is stamped in Rust at emit time (ms since UNIX epoch).
 export interface DebugEvent {
   category: string;
   message: string;
+  level: "error" | "warn" | "info" | "debug" | "trace";
   ts: number;
 }
 

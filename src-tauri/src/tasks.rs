@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::async_runtime;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 /// Lifecycle status of a task. Serialized as lowercase strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ impl TaskStore {
         identity: &DedupIdentity,
     ) -> Option<String> {
         {
-            let mut active = self.active_dedup.lock().unwrap();
+            let mut active = self.active_dedup.lock().unwrap_or_else(|e| e.into_inner());
             if identity.trigger == crate::pipeline::Trigger::Automatic && active.contains(identity)
             {
                 return None;
@@ -256,7 +256,7 @@ impl TaskStore {
             active.insert(identity.clone());
         }
 
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let task_id = metadata.task_id.clone();
         tasks.insert(task_id.clone(), metadata);
         Some(task_id)
@@ -264,7 +264,11 @@ impl TaskStore {
 
     /// Get a copy of a task by id.
     pub(crate) fn get(&self, task_id: &str) -> Option<TaskMetadata> {
-        self.tasks.lock().unwrap().get(task_id).cloned()
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(task_id)
+            .cloned()
     }
 
     /// Update a task's status, stale flag, and error.
@@ -275,7 +279,12 @@ impl TaskStore {
         stale: bool,
         error: Option<String>,
     ) {
-        if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
+        if let Some(task) = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(task_id)
+        {
             task.status = status;
             task.stale = stale;
             task.error = error;
@@ -284,7 +293,10 @@ impl TaskStore {
 
     /// Remove a task's dedup identity from the active set (call when task completes or fails).
     pub(crate) fn clear_dedup(&self, identity: &DedupIdentity) {
-        self.active_dedup.lock().unwrap().remove(identity);
+        self.active_dedup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(identity);
     }
 }
 
@@ -365,26 +377,26 @@ pub(crate) fn dispatch_task(
 
         // Debug instrumentation: report the outgoing LLM call (kind and
         // resolved model) right before it is dispatched to the provider.
-        if app.state::<crate::config::ConfigState>().debug() {
-            let kind_str = match request.kind {
-                crate::llm::LlmRequestKind::Extraction => "extraction",
-                crate::llm::LlmRequestKind::FactCheck => "fact_check",
-                crate::llm::LlmRequestKind::Research => "research",
-            };
-            let model = request
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty())
-                .unwrap_or("<unset>");
-            crate::debug::emit_debug_event(
-                &app,
-                "llm_call",
-                format!("{kind_str} -> {model}"),
-            );
-        }
+        // The category field keeps the existing "llm_call" UI category.
+        let kind_str = match request.kind {
+            crate::llm::LlmRequestKind::Extraction => "extraction",
+            crate::llm::LlmRequestKind::FactCheck => "fact_check",
+            crate::llm::LlmRequestKind::Research => "research",
+        };
+        let model = request
+            .model
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .unwrap_or("<unset>");
+        tracing::info!(category = "llm_call", "{kind_str} -> {model}");
 
-        match provider.complete(request.clone()).await {
-            Ok(response) => {
+        // The provider call runs in an INNER task so that a panic inside it is
+        // observed by the supervisor below instead of silently hanging the
+        // outer task and leaving the frontend stuck on "running". The inner
+        // task returns the outcome as a Result; the outer task maps it to
+        // frontend events and always clears the dedup identity.
+        let inner = async_runtime::spawn(async move {
+            provider.complete(request.clone()).await.map(|response| {
                 // Inline command tasks anchor to a single command line, so
                 // their staleness is line-granular: re-parse the file and
                 // check the raw command line's hash. A missing line_text_hash
@@ -410,17 +422,23 @@ pub(crate) fn dispatch_task(
                 } else {
                     (TaskStatus::Completed, false)
                 };
+                (status, stale_flag, response.result)
+            })
+        });
+
+        match inner.await {
+            Ok(Ok((status, stale_flag, result_value))) => {
                 store.update(&spawned_task_id, status, stale_flag, None);
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status,
                     stale: stale_flag,
-                    result: Some(response.result),
+                    result: Some(result_value),
                     error: None,
                 };
                 let _ = app.emit("agent://result-ready", result);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let sanitized = scrub_error(&e.to_string());
                 store.update(
                     &spawned_task_id,
@@ -436,6 +454,32 @@ pub(crate) fn dispatch_task(
                     error: Some(sanitized),
                 };
                 let _ = app.emit("agent://result-ready", result);
+            }
+            Err(join_error) => {
+                // The inner task panicked. Never scrub the panic payload: it
+                // may embed sensitive data. A fixed safe message crosses to
+                // the frontend instead, and the panic details go to the log.
+                let sanitized = scrub_error("internal task error");
+                store.update(
+                    &spawned_task_id,
+                    TaskStatus::Failed,
+                    false,
+                    Some(sanitized.clone()),
+                );
+                let result = TaskResult {
+                    task_id: spawned_task_id.clone(),
+                    status: TaskStatus::Failed,
+                    stale: false,
+                    result: None,
+                    error: Some(sanitized),
+                };
+                let _ = app.emit("agent://result-ready", result);
+                tracing::error!(
+                    category = "task",
+                    "task {} panicked: {:?}",
+                    spawned_task_id,
+                    join_error
+                );
             }
         }
 
@@ -491,20 +535,18 @@ pub(crate) async fn submit_block(
     // can show what the auto path saw. The argument is truncated to keep the
     // event payload small.
     if let Some(parsed) = &command {
-        if config_state.debug() {
-            let name = match &parsed.command {
-                crate::pipeline::SlashCommand::FactCheck => "/fact-check",
-                crate::pipeline::SlashCommand::Research => "/research",
-                crate::pipeline::SlashCommand::Ignore => "/ignore",
-            };
-            let mut message = name.to_string();
-            if !parsed.focus_text.is_empty() {
-                let truncated: String = parsed.focus_text.chars().take(80).collect();
-                message.push(' ');
-                message.push_str(&truncated);
-            }
-            crate::debug::emit_debug_event(&app, "slash_command", message);
+        let name = match &parsed.command {
+            crate::pipeline::SlashCommand::FactCheck => "/fact-check",
+            crate::pipeline::SlashCommand::Research => "/research",
+            crate::pipeline::SlashCommand::Ignore => "/ignore",
+        };
+        let mut message = name.to_string();
+        if !parsed.focus_text.is_empty() {
+            let truncated: String = parsed.focus_text.chars().take(80).collect();
+            message.push(' ');
+            message.push_str(&truncated);
         }
+        tracing::info!(category = "slash_command", "{}", message);
     }
     let decision = crate::pipeline::route_block(&block, command.as_ref());
     match decision {
@@ -636,9 +678,7 @@ pub(crate) async fn submit_fact_check(
     heading_chain: Vec<String>,
     source_hash: String,
 ) -> Result<String, String> {
-    if config_state.debug() {
-        crate::debug::emit_debug_event(&app, "slash_command", "/fact-check".to_string());
-    }
+    tracing::info!(category = "slash_command", "/fact-check");
     let small_model = config_state.small_model();
     let request = crate::pipeline::build_fact_check_request(
         &claim_text,
@@ -690,9 +730,7 @@ pub(crate) async fn submit_research(
     document: String,
     source_hash: String,
 ) -> Result<String, String> {
-    if config_state.debug() {
-        crate::debug::emit_debug_event(&app, "slash_command", "/research".to_string());
-    }
+    tracing::info!(category = "slash_command", "/research");
     let large_model = config_state.large_model();
     let request =
         crate::pipeline::build_research_request(&goal, &selection, &document, &large_model);
