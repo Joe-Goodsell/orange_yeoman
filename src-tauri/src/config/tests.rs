@@ -34,22 +34,83 @@ fn malformed_api_keys_error_does_not_leak_secret() {
     assert!(err.contains("line 1"), "missing line info: {err}");
 }
 
-// A partial models object must parse, and each missing field must fall
-// back to the built-in default without clobbering earlier layers.
+// A partial models object must parse, and each missing field must stay empty
+// (unset) without clobbering earlier merge layers.
 #[test]
-fn partial_models_object_uses_builtin_defaults_for_missing_fields() {
+fn partial_models_object_leaves_missing_fields_empty() {
     let global: ConfigFile = serde_json::from_str(r#"{"models": {"small": "global-small"}}"#)
         .expect("partial global models must parse");
     let mut merged = MergedConfig::default();
     apply_file(&mut merged, &global);
     assert_eq!(merged.small_model, "global-small");
-    assert_eq!(merged.large_model, DEFAULT_LARGE_MODEL);
+    assert_eq!(merged.large_model, "");
 
     let repo: ConfigFile = serde_json::from_str(r#"{"models": {"large": "repo-large"}}"#)
         .expect("partial repo models must parse");
     apply_file(&mut merged, &repo);
     assert_eq!(merged.small_model, "global-small");
     assert_eq!(merged.large_model, "repo-large");
+}
+
+// The pure validation helper renders exact messages: empty models get a
+// "not configured" message, unknown models get the sorted available list.
+#[test]
+fn validate_model_strings_formats_messages() {
+    // Both models present and valid: no messages.
+    let valid = validate_model_strings(
+        "gpt-4o",
+        "gpt-4o-mini",
+        &["gpt-4o".to_string(), "gpt-4o-mini".to_string()],
+    );
+    assert!(valid.is_empty(), "valid models must produce no messages");
+
+    // Unknown small model: exact message with the available list.
+    let invalid = validate_model_strings("bogus", "gpt-4o", &["gpt-4o".to_string()]);
+    assert_eq!(
+        invalid,
+        vec!["Invalid model bogus. Available models: gpt-4o".to_string()]
+    );
+
+    // Empty small model: exact "not configured" message.
+    let missing = validate_model_strings("", "gpt-4o", &["gpt-4o".to_string()]);
+    assert_eq!(missing, vec!["No small model configured".to_string()]);
+
+    // The available list renders sorted even when passed unsorted.
+    let unsorted = validate_model_strings(
+        "bogus",
+        "gpt-4o",
+        &["gpt-4o-mini".to_string(), "gpt-4o".to_string()],
+    );
+    assert_eq!(
+        unsorted,
+        vec!["Invalid model bogus. Available models: gpt-4o, gpt-4o-mini".to_string()]
+    );
+
+    // An empty available list renders the "(none)" placeholder with no
+    // trailing space after the colon.
+    let empty_available = validate_model_strings("bogus", "", &[]);
+    assert_eq!(
+        empty_available,
+        vec![
+            "Invalid model bogus. Available models: (none)".to_string(),
+            "No large model configured".to_string(),
+        ]
+    );
+    assert!(
+        !empty_available[0].ends_with(' '),
+        "message must not end with a trailing space: {}",
+        empty_available[0]
+    );
+
+    // The large-model message uses the same placeholder when the list is empty.
+    let empty_available_large = validate_model_strings("", "bogus", &[]);
+    assert_eq!(
+        empty_available_large,
+        vec![
+            "No small model configured".to_string(),
+            "Invalid model bogus. Available models: (none)".to_string(),
+        ]
+    );
 }
 
 // An absent debug key in a project config must not clobber an explicit

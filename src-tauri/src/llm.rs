@@ -14,6 +14,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub(crate) mod providers;
+pub(crate) use providers::fetch_available_models;
+
 // Kind of LLM work requested by the frontend. Serialized as snake_case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

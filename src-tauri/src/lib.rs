@@ -27,7 +27,7 @@ pub fn run() {
         .manage(llm::LlmState::default())
         .manage(Arc::new(tasks::TaskStore::default()))
         .setup(|app| {
-            // Initialize the merged config with built-in defaults plus the
+            // Initialize the merged config with empty defaults plus the
             // global config. No config file is created; missing files are valid.
             // Any error is stored in status and the app continues.
             config::reload_config_state(&app.state::<config::ConfigState>(), None);
@@ -36,6 +36,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             config::get_config_status,
             config::load_project_config,
+            config::validate_models,
             filesystem::list_dir,
             filesystem::read_text_file,
             llm::complete_llm,
