@@ -112,15 +112,14 @@ fn classify_and_emit(app: &tauri::AppHandle, root: &Path, event: &notify::Event)
         ClassifiedChange::Content => emit_watcher_change(app, &path, "content"),
     }
     // Debug instrumentation: report the classified change so the frontend can
-    // show what the watcher reacted to.
-    if app.state::<ConfigState>().debug() {
-        let message = match change {
-            ClassifiedChange::Config => format!("config changed: {}", root.display()),
-            ClassifiedChange::Structure => format!("structure change: {}", path.display()),
-            ClassifiedChange::Content => format!("content change: {}", path.display()),
-        };
-        crate::debug::emit_debug_event(app, "watcher", message);
-    }
+    // show what the watcher reacted to. The category field keeps the existing
+    // "watcher" UI category.
+    let message = match change {
+        ClassifiedChange::Config => format!("config changed: {}", root.display()),
+        ClassifiedChange::Structure => format!("structure change: {}", path.display()),
+        ClassifiedChange::Content => format!("content change: {}", path.display()),
+    };
+    tracing::info!(category = "watcher", "{}", message);
 }
 
 fn emit_watcher_change(app: &tauri::AppHandle, path: &Path, kind: &str) {
@@ -162,7 +161,7 @@ pub(crate) fn start_watcher(
                 }
             }
             Err(errors) => {
-                eprintln!("watcher debounce errors: {errors:?}");
+                tracing::error!(category = "watcher", "debounce errors: {:?}", errors);
             }
         },
     )
