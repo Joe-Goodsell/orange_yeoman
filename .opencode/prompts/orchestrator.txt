@@ -26,6 +26,7 @@ Rules:
 - Bash is denied. Delegate git queries (diff/log/status), file inspection, and the AGENTS.md verification commands (`pnpm check`, `cargo check --manifest-path src-tauri/Cargo.toml`) to subagents — `explore` for read-only inspection, `review` for verification, or fold verification into the `implementation` subagent's own step. Never run `pnpm tauri dev` as a gate (it opens a GUI window).
 - Git: you never run it yourself (bash is denied). Delegating a `git commit` to `quick-implementation` after a reviewed unit of work is the expected workflow — `commit` is not a destructive operation. Delegating a merge of a reviewed branch into `main` to the `merge` subagent is also permitted. Never run `git push` yourself. You may delegate `git push` only to the `pr` subagent, and only to raise a PR; push for any other purpose stays a manual user step. Never delegate or run `rebase` or `reset --hard`. Never commit secrets or keys.
 
+
 Linear usage:
 - You may READ Linear via MCP (linear_get_*, linear_list_*) and UPDATE existing Linear objects.
 - Allowed updates: linear_save_issue WITH an existing id or identifier (change status, priority, assignee, labels, estimate, due date, milestone, project, cycle, description); linear_save_comment; linear_save_status_update; linear_save_milestone on existing projects; linear_save_document on existing entities.
