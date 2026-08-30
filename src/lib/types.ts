@@ -21,6 +21,7 @@ export interface ConfigStatus {
   configured_providers: string[];
   error: string | null;
   debug: boolean;
+  mock_llm: boolean;
 }
 
 // Payload emitted by Rust on the "debug://event" channel. Error and warning

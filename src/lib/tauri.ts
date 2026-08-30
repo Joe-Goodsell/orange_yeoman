@@ -79,9 +79,10 @@ export function onDebugEvent(cb: (e: DebugEvent) => void): Promise<UnlistenFn> {
   });
 }
 
-// LLM completion through the provider boundary. Rust dispatches to the
-// app-owned provider (currently the deterministic mock). No editor, store, or
-// UI wiring yet; this is the thin invoke wrapper for the boundary.
+// LLM completion through the provider boundary. Rust selects the provider
+// from the mockLlm config flag. It uses the mock provider when the flag is
+// true and the real provider when it is false. No editor, store, or UI wiring
+// yet; this is the thin invoke wrapper for the boundary.
 export async function completeLlm(request: LlmRequest): Promise<LlmResponse> {
   return invoke<LlmResponse>("complete_llm", { request });
 }

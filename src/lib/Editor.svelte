@@ -12,16 +12,18 @@
   import { Decoration, EditorView, keymap } from "@codemirror/view";
   import { completionStatus } from "@codemirror/autocomplete";
   import { project } from "./stores/project.svelte";
-  import { submitBlock } from "./tauri";
+  import { submitBlock, getTaskStatus } from "./tauri";
   import {
     detectSlashCommandInLine,
     hashText,
     paragraphAround,
     type DetectedCommand,
+    type ParagraphSlice,
   } from "./slashCommands";
   import { slashCommandAutocomplete } from "./slashCommandAutocomplete";
   import { markdownHighlight } from "./markdownHighlight";
   import type { AgentFeedback, SourceRange } from "./types";
+  import { byteOffsetToCharOffset, commandNameToFeedbackKind } from "./taskFeedback";
 
   // Plain text-only editor for the initial build. Markdown syntax highlighting
   // (token coloring only, via markdownHighlight) is wired below; markdown
@@ -141,11 +143,54 @@
       from: paragraph.startOffset,
       to: paragraph.startOffset + paragraph.text.length,
     };
-    project.dispatchMockFeedback(detected, range);
-    submitBlock(project.openFilePath, paragraph.text).catch((e) => {
-      project.error = String(e);
-    });
+    void dispatchSlashCommand(detected, range, paragraph);
     return false;
+  }
+
+  // Dispatch a slash command through the Rust task pipeline. When Rust
+  // dispatches a task (currently /fact-check), register it immediately so the
+  // queued card appears, then refine the source range to the focus line using
+  // the byte offsets from task metadata. When Rust does not dispatch
+  // (currently /research, /ignore — not yet wired), fall back to the frontend
+  // timer mock so the pane still shows the command lifecycle.
+  async function dispatchSlashCommand(
+    detected: DetectedCommand,
+    paragraphRange: SourceRange,
+    paragraph: ParagraphSlice,
+  ): Promise<void> {
+    const kind = commandNameToFeedbackKind(detected.name);
+    if (!kind) return;
+    const filePath = project.openFilePath;
+    if (!filePath) return;
+    try {
+      const taskId = await submitBlock(filePath, paragraph.text);
+      if (taskId) {
+        // Register the queued item before the running event arrives.
+        project.registerTask(taskId, kind, paragraphRange);
+        // Refine the range to the focus line. The metadata byte offsets are
+        // paragraph-relative; convert them to character offsets within the
+        // paragraph, then add the paragraph's start offset for file-relative
+        // character offsets the editor expects.
+        const meta = await getTaskStatus(taskId);
+        if (meta && meta.focusStart != null && meta.focusEnd != null) {
+          const from =
+            paragraph.startOffset +
+            byteOffsetToCharOffset(paragraph.text, meta.focusStart);
+          const to =
+            paragraph.startOffset +
+            byteOffsetToCharOffset(paragraph.text, meta.focusEnd);
+          project.updateFeedback(taskId, {
+            range: { file: filePath, from, to },
+          });
+        }
+      } else {
+        // Rust did not dispatch this command. Fall back to the mock so the
+        // pane still shows the lifecycle for /research and /ignore.
+        project.dispatchMockFeedback(detected, paragraphRange);
+      }
+    } catch (e) {
+      project.error = String(e);
+    }
   }
 
   onMount(() => {

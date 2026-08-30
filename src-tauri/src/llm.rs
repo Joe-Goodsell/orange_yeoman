@@ -1,8 +1,8 @@
 // Provider-neutral LLM boundary. This phase defines the frontend-facing
 // request/response domain types, an async provider trait, and a deterministic
-// MockProvider that performs no network I/O and makes no real LLM calls. Real
-// providers (e.g. Anthropic Message Batches) implement the same trait in a
-// later phase.
+// MockProvider that returns readable placeholder text marked mock: true. The
+// mock performs no network I/O and makes no real LLM calls. Real providers
+// (e.g. Anthropic Message Batches) implement the same trait in a later phase.
 //
 // There is no streaming or message-list boundary yet: the boundary is a single
 // request in, one structured response out. API key values never appear in this
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) mod providers;
 pub(crate) use providers::fetch_available_models;
@@ -70,9 +70,8 @@ pub(crate) struct LlmResponse {
 #[derive(Debug)]
 pub(crate) enum LlmError {
     EmptyUserPrompt,
-    // Not yet constructed by any real provider in this phase; real providers
-    // build it in a later phase.
-    #[allow(dead_code)]
+    // Constructed by the real provider stub in this phase; the full HTTP
+    // transport builds it in a later phase.
     Provider(String),
 }
 
@@ -124,10 +123,10 @@ pub(crate) trait LlmProvider: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse, LlmError>> + Send + '_>>;
 }
 
-// Deterministic mock provider. Returns hardcoded structured JSON for every
-// request kind, never touches the network, and never copies the user prompt
-// into its output. Results are marked mock: true so callers do not mistake
-// them for authoritative or sourced research.
+// Deterministic mock provider. Returns readable placeholder text marked
+// mock: true for every request kind, never touches the network, and never
+// copies the user prompt into its output. Results are never authoritative or
+// sourced research.
 pub(crate) struct MockProvider;
 
 impl MockProvider {
@@ -141,6 +140,13 @@ const MOCK_SCHEMA_VERSION: u64 = 1;
 const MOCK_INPUT_TOKENS: u64 = 10;
 const MOCK_OUTPUT_TOKENS: u64 = 20;
 
+// Readable placeholder text returned by the mock. The text is obvious
+// during testing and never carries the user prompt or any sourced data.
+const MOCK_PLACEHOLDER_TEXT: &str =
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+     Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. \
+     Mock provider output.";
+
 // Stable response ID for a request kind. Equivalent request kinds map to the
 // same ID; different kinds map to different IDs.
 fn mock_response_id(kind: LlmRequestKind) -> String {
@@ -152,47 +158,15 @@ fn mock_response_id(kind: LlmRequestKind) -> String {
     .to_string()
 }
 
-// Hardcoded structured result per request kind. No prompt content, API key
-// material, or model output ever appears here.
-fn mock_result(kind: LlmRequestKind) -> serde_json::Value {
-    match kind {
-        LlmRequestKind::Extraction => serde_json::json!({
-            "schema_version": MOCK_SCHEMA_VERSION,
-            "mock": true,
-            "claims": [
-                {
-                    "id": "mock-claim-1",
-                    "text": "Placeholder claim text. Mock provider output.",
-                    "confidence": "low",
-                    "sources": []
-                }
-            ]
-        }),
-        LlmRequestKind::FactCheck => serde_json::json!({
-            "schema_version": MOCK_SCHEMA_VERSION,
-            "mock": true,
-            "checks": [
-                {
-                    "id": "mock-check-1",
-                    "claim": "Placeholder claim text. Mock provider output.",
-                    "verdict": "unverified",
-                    "sources": []
-                }
-            ]
-        }),
-        LlmRequestKind::Research => serde_json::json!({
-            "schema_version": MOCK_SCHEMA_VERSION,
-            "mock": true,
-            "topics": [
-                {
-                    "id": "mock-topic-1",
-                    "query": "Placeholder research topic. Mock provider output.",
-                    "status": "queued",
-                    "sources": []
-                }
-            ]
-        }),
-    }
+// Readable placeholder result. The shape is the same for every request
+// kind: a schema_version, the mock marker, and the placeholder text. No
+// prompt content, API key material, or model output appears here.
+fn mock_result(_kind: LlmRequestKind) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": MOCK_SCHEMA_VERSION,
+        "mock": true,
+        "text": MOCK_PLACEHOLDER_TEXT
+    })
 }
 
 fn mock_complete(request: LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -222,22 +196,73 @@ impl LlmProvider for MockProvider {
     }
 }
 
-// Shared provider state held by Tauri. Defaults to the mock provider.
+// Placeholder real provider. It performs no network I/O yet. A later task
+// replaces this with the real HTTP transport. Until then it returns a safe
+// error for any non-empty prompt so the false path is observable and
+// testable. The error text carries no secret material.
+pub(crate) struct RealProvider;
+
+impl LlmProvider for RealProvider {
+    fn complete(
+        &self,
+        request: LlmRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse, LlmError>> + Send + '_>> {
+        Box::pin(async move {
+            if request.user_prompt.trim().is_empty() {
+                return Err(LlmError::EmptyUserPrompt);
+            }
+            Err(LlmError::Provider(
+                "real LLM provider is not yet available; set mockLlm true to use the mock provider"
+                    .to_string(),
+            ))
+        })
+    }
+}
+
+// Select the active provider from the mockLlm config flag. When the flag
+// is true, install the deterministic mock. When the flag is false, install
+// the real provider. The real provider does HTTP work in a later task;
+// this stub returns a safe, sanitized error until that work lands.
+pub(crate) fn select_provider(mock_llm: bool) -> Arc<dyn LlmProvider> {
+    if mock_llm {
+        Arc::new(MockProvider::new())
+    } else {
+        Arc::new(RealProvider)
+    }
+}
+
+// Shared provider state held by Tauri. The provider is swappable at runtime
+// so a config reload can switch between the mock and the real provider
+// without re-managing Tauri state. The lock guards only the Arc swap and
+// clone; it is never held across an await.
 pub(crate) struct LlmState {
-    provider: Arc<dyn LlmProvider>,
+    provider: Mutex<Arc<dyn LlmProvider>>,
 }
 
 impl LlmState {
-    /// Clone of the current provider Arc, for dispatch sites outside this module.
+    /// Clone of the current provider Arc, for dispatch sites outside this
+    /// module. The lock is released before the returned future runs.
     pub(crate) fn provider(&self) -> Arc<dyn LlmProvider> {
-        self.provider.clone()
+        self.provider
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|e| e.into_inner().clone())
+    }
+
+    /// Replace the active provider. Called after a config reload selects
+    /// the provider from the mockLlm flag.
+    pub(crate) fn set_provider(&self, provider: Arc<dyn LlmProvider>) {
+        let mut guard = self.provider
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = provider;
     }
 }
 
 impl Default for LlmState {
     fn default() -> Self {
         LlmState {
-            provider: Arc::new(MockProvider::new()),
+            provider: Mutex::new(Arc::new(MockProvider::new())),
         }
     }
 }
@@ -250,7 +275,8 @@ pub(crate) async fn complete_llm(
     state: tauri::State<'_, LlmState>,
     request: LlmRequest,
 ) -> Result<LlmResponse, String> {
-    match state.provider.complete(request).await {
+    let provider = state.provider();
+    match provider.complete(request).await {
         Ok(response) => Ok(response),
         Err(e) => Err(e.to_string()),
     }
