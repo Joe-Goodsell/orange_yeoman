@@ -41,33 +41,28 @@ fn complete(kind: LlmRequestKind, user_prompt: &str) -> Result<LlmResponse, LlmE
     block_on(provider.complete(request(kind, user_prompt)))
 }
 
-// Each request kind returns the correct structured schema shape: a top-level
-// schema_version and mock marker plus a kind-specific non-empty array.
+// Each request kind returns the same flat schema shape: a top-level
+// schema_version, the mock marker, and readable placeholder text.
 #[test]
 fn each_request_kind_returns_correct_schema_shape() {
-    let extraction =
-        complete(LlmRequestKind::Extraction, "example prompt").expect("mock must succeed");
-    assert_eq!(extraction.result["schema_version"], 1);
-    assert_eq!(extraction.result["mock"], true);
-    let claims = extraction.result["claims"]
-        .as_array()
-        .expect("claims array");
-    assert!(!claims.is_empty(), "claims array must be non-empty");
-
-    let fact_check =
-        complete(LlmRequestKind::FactCheck, "example prompt").expect("mock must succeed");
-    assert_eq!(fact_check.result["schema_version"], 1);
-    assert_eq!(fact_check.result["mock"], true);
-    let checks = fact_check.result["checks"]
-        .as_array()
-        .expect("checks array");
-    assert!(!checks.is_empty(), "checks array must be non-empty");
-
-    let research = complete(LlmRequestKind::Research, "example prompt").expect("mock must succeed");
-    assert_eq!(research.result["schema_version"], 1);
-    assert_eq!(research.result["mock"], true);
-    let topics = research.result["topics"].as_array().expect("topics array");
-    assert!(!topics.is_empty(), "topics array must be non-empty");
+    for kind in [
+        LlmRequestKind::Extraction,
+        LlmRequestKind::FactCheck,
+        LlmRequestKind::Research,
+    ] {
+        let response =
+            complete(kind, "example prompt").expect("mock must succeed");
+        assert_eq!(response.result["schema_version"], 1);
+        assert_eq!(response.result["mock"], true);
+        let text = response.result["text"]
+            .as_str()
+            .expect("text string");
+        assert!(!text.is_empty(), "text must be non-empty");
+        assert!(
+            text.contains("Lorem ipsum"),
+            "text must contain readable placeholder: {text}"
+        );
+    }
 }
 
 // Equivalent request kinds (same kind, same prompt) return the same stable
@@ -177,4 +172,31 @@ fn response_json_uses_camel_case_field_names() {
         .expect("usage must be an object");
     assert!(usage.contains_key("inputTokens"), "missing inputTokens");
     assert!(usage.contains_key("outputTokens"), "missing outputTokens");
+}
+
+// select_provider(true) installs the mock, which completes successfully.
+#[test]
+fn select_provider_true_uses_mock() {
+    let provider = select_provider(true);
+    let response = block_on(provider.complete(request(LlmRequestKind::Research, "prompt")))
+        .expect("mock provider must succeed");
+    assert_eq!(response.result["mock"], true);
+}
+
+// select_provider(false) installs the real provider stub. A non-empty
+// prompt returns the not-yet-available error; an empty prompt returns
+// EmptyUserPrompt. The error text never echoes the prompt.
+#[test]
+fn select_provider_false_real_provider_errors() {
+    let provider = select_provider(false);
+    let err = block_on(provider.complete(request(LlmRequestKind::Research, "prompt")))
+        .expect_err("real provider stub must error");
+    assert!(matches!(err, LlmError::Provider(_)));
+    let msg = err.to_string();
+    assert!(msg.contains("not yet available"), "unexpected error: {msg}");
+    assert!(!msg.contains("prompt"), "error echoes prompt: {msg}");
+
+    let empty_err = block_on(provider.complete(request(LlmRequestKind::Research, "   ")))
+        .expect_err("empty prompt must be rejected");
+    assert!(matches!(empty_err, LlmError::EmptyUserPrompt));
 }

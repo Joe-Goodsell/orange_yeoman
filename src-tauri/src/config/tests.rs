@@ -204,3 +204,95 @@ fn poisoned_lock_debug_fails_closed() {
 
     assert_eq!(state.debug(), false);
 }
+
+// mock_llm defaults to true when no config file supplies it, so a fresh
+// install works without API keys.
+#[test]
+fn default_mock_llm_is_true_without_config() {
+    let merged = MergedConfig::default();
+    assert_eq!(merged.mock_llm, true);
+}
+
+// An absent mock_llm key in a project config must not clobber an explicit
+// false from the global config. Option<bool> with serde(default) is the
+// "not supplied" sentinel that apply_file skips.
+#[test]
+fn absent_project_mock_llm_preserves_global_false() {
+    let global: ConfigFile = serde_json::from_str(r#"{"mockLlm": false}"#)
+        .expect("global mockLlm false must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+    assert_eq!(merged.mock_llm, false);
+
+    let project: ConfigFile = serde_json::from_str(r#"{}"#)
+        .expect("absent mockLlm key must parse");
+    apply_file(&mut merged, &project);
+    assert_eq!(merged.mock_llm, false);
+}
+
+// A project mockLlm:false must override a global mockLlm:true.
+#[test]
+fn project_mock_llm_false_overrides_global_true() {
+    let global: ConfigFile = serde_json::from_str(r#"{"mockLlm": true}"#)
+        .expect("global mockLlm true must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+
+    let project: ConfigFile = serde_json::from_str(r#"{"mockLlm": false}"#)
+        .expect("project mockLlm false must parse");
+    apply_file(&mut merged, &project);
+    assert_eq!(merged.mock_llm, false);
+}
+
+// A project mockLlm:true must override a global mockLlm:false.
+#[test]
+fn project_mock_llm_true_overrides_global_false() {
+    let global: ConfigFile = serde_json::from_str(r#"{"mockLlm": false}"#)
+        .expect("global mockLlm false must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+
+    let project: ConfigFile = serde_json::from_str(r#"{"mockLlm": true}"#)
+        .expect("project mockLlm true must parse");
+    apply_file(&mut merged, &project);
+    assert_eq!(merged.mock_llm, true);
+}
+
+// ConfigStatus carries the merged mock_llm flag to the frontend.
+#[test]
+fn config_status_carries_merged_mock_llm_false() {
+    let mut merged = MergedConfig::default();
+    let global: ConfigFile = serde_json::from_str(r#"{"mockLlm": false}"#)
+        .expect("global mockLlm false must parse");
+    apply_file(&mut merged, &global);
+
+    let status = ConfigStatus::from(&merged);
+    assert_eq!(status.mock_llm, false);
+}
+
+#[test]
+fn config_status_carries_merged_mock_llm_true() {
+    let merged = MergedConfig::default();
+    let status = ConfigStatus::from(&merged);
+    assert_eq!(status.mock_llm, true);
+}
+
+// A poisoned lock must fail closed: the stored mock_llm value is read
+// from the recovered guard, so mock_llm:false stays false after a panic
+// while the lock is held.
+#[test]
+fn poisoned_lock_mock_llm_fails_closed() {
+    let state = ConfigState::default();
+    {
+        let mut guard = state.inner.lock().expect("config lock");
+        guard.mock_llm = false;
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let _guard = state.inner.lock().expect("config lock");
+        panic!("poison the config lock");
+    });
+    assert!(result.is_err(), "catch_unwind must observe the panic");
+
+    assert_eq!(state.mock_llm(), false);
+}

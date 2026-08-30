@@ -44,6 +44,19 @@
       "mode": "primary",
       "description": "Edit-capable primary. Delegates heavy work to subagents but can edit directly when convenient. Tab-switch alternative to orchestrator."
     },
+    "supervisor": {
+      "mode": "primary",
+      "description": "Project-manager primary agent. Creates, updates, and tracks Linear tickets. Never writes code or runs bash. Linear-only; reads files for context only.",
+      "prompt": "{file:.opencode/prompts/supervisor.txt}",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "skill": "allow",
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
     "general": {
       "mode": "subagent",
       "model": "opencode-go/deepseek-v4-flash",

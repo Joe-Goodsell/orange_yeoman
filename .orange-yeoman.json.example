@@ -7,5 +7,6 @@
     "small": "deepseek-v4-flash",
     "large": "openai-codex-5.6"
   },
+  "mockLlm": true,
   "debug": true
 }
