@@ -36,6 +36,7 @@
     unlistenWatcher = un;
     unlistenConfig = unCfg;
     unlistenDebug = unDbg;
+    await project.mount();
     if (project.projectRoot) {
       // Refresh the merged config status for the persisted root. The global
       // config was already loaded during Rust app setup.
@@ -51,6 +52,7 @@
 
   onDestroy(() => {
     alive = false;
+    project.destroy();
     unlistenWatcher?.();
     unlistenConfig?.();
     unlistenDebug?.();

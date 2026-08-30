@@ -1,14 +1,28 @@
 import {
   loadProjectConfig as loadProjectConfigCmd,
   readTextFile,
+  onTaskUpdated,
+  onResultReady,
+  getTaskStatus,
 } from "../tauri";
 import type {
   AgentFeedback,
   ChangeEvent,
   ConfigStatus,
   EditorSelection,
+  FeedbackKind,
+  FeedbackStatus,
   SourceRange,
+  TaskEvent,
+  TaskResult,
 } from "../types";
+import {
+  describeTaskResult,
+  requestKindToFeedbackKind,
+  taskStatusToFeedbackStatus,
+  titleForKind,
+  triggerToFeedbackKind,
+} from "../taskFeedback";
 
 const STORAGE_KEY = "orange-yeoman:project-root";
 
@@ -70,6 +84,10 @@ class ProjectStore {
   );
 
   private gen = 0;
+
+  // ---- Task event subscriptions ----
+  private taskUnlisteners: Array<() => void> = [];
+  private taskSubsAlive = false;
 
   applyConfigStatus(status: ConfigStatus) {
     this.configStatus = status;
@@ -196,6 +214,164 @@ class ProjectStore {
   // still links ranges that contain it.
   setEditorSelection(sel: EditorSelection | null) {
     this.editorSelection = sel;
+  }
+
+  // ---- Task lifecycle wiring (Rust event channels) ----
+  //
+  // Subscribe to the two Rust task-event channels on mount and unsubscribe on
+  // destroy. The store maps each TaskEvent and TaskResult to an AgentFeedback
+  // item keyed by the task id. The editor calls registerTask right after
+  // submitBlock returns so the queued card appears before the running event;
+  // it also refines the source range from the paragraph-level provisional
+  // range to the focus-line range using the byte offsets from metadata.
+
+  async mount() {
+    this.taskSubsAlive = true;
+    const unUpdate = await onTaskUpdated((e) => this.applyTaskEvent(e));
+    if (!this.taskSubsAlive) {
+      try {
+        unUpdate();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const unResult = await onResultReady((r) => this.applyTaskResult(r));
+    if (!this.taskSubsAlive) {
+      try {
+        unUpdate();
+      } catch {
+        // ignore
+      }
+      try {
+        unResult();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    this.taskUnlisteners = [unUpdate, unResult];
+  }
+
+  destroy() {
+    this.taskSubsAlive = false;
+    for (const un of this.taskUnlisteners) {
+      try {
+        un();
+      } catch {
+        // ignore
+      }
+    }
+    this.taskUnlisteners = [];
+  }
+
+  // Register a task the editor just submitted. Creates a queued item
+  // immediately so the card appears before the running event. If an event
+  // already arrived (race), upserts the range and kind without downgrading the
+  // status.
+  registerTask(taskId: string, kind: FeedbackKind, range: SourceRange) {
+    const existing = this.feedback.find((f) => f.id === taskId);
+    if (existing) {
+      this.updateFeedback(taskId, { range, kind });
+      return;
+    }
+    const now = this.timestamp();
+    this.addFeedback({
+      id: taskId,
+      kind,
+      status: "queued",
+      provider: "mock",
+      model: "mock-provider-v1",
+      range,
+      title: titleForKind(kind),
+      summary: "Queued...",
+      detail: "",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Handle a TaskEvent (status changed to running). Updates the existing item
+  // or adopts via a metadata fetch when the event arrived before registration.
+  applyTaskEvent(event: TaskEvent) {
+    const kind = requestKindToFeedbackKind(event.kind);
+    const status = taskStatusToFeedbackStatus(event.status);
+    if (this.feedback.some((f) => f.id === event.taskId)) {
+      this.updateFeedback(event.taskId, { status, kind });
+    } else {
+      void this.adoptTask(event.taskId, kind, status);
+    }
+  }
+
+  // Handle a TaskResult (completed, stale, or failed). Updates the existing
+  // item with the mock result text, or adopts when no prior item exists.
+  applyTaskResult(result: TaskResult) {
+    const status = taskStatusToFeedbackStatus(result.status);
+    const { summary, detail } = describeTaskResult(result.result, result.error);
+    if (this.feedback.some((f) => f.id === result.taskId)) {
+      this.updateFeedback(result.taskId, { status, summary, detail });
+    } else {
+      void this.adoptTask(result.taskId, "correction", status, summary, detail);
+    }
+  }
+
+  // Defensive fallback: an event or result arrived before the editor
+  // registered the task. Fetch metadata for the file path and create the item
+  // with a degenerate range; the editor's registerTask will refine the range.
+  private async adoptTask(
+    taskId: string,
+    kind: FeedbackKind,
+    status: FeedbackStatus,
+    summary?: string,
+    detail?: string,
+  ) {
+    let file: string | null = null;
+    let resolvedKind = kind;
+    try {
+      const meta = await getTaskStatus(taskId);
+      if (meta) {
+        file = meta.filePath;
+        // For the result-adopt path the kind was a default; refine it from
+        // the trigger if metadata is available.
+        if (summary !== undefined) {
+          resolvedKind = triggerToFeedbackKind(meta.trigger);
+        }
+      }
+    } catch {
+      // metadata fetch failed; use the open file as a best guess
+    }
+    // The item may have been created by registerTask while this adopt was
+    // suspended at the metadata fetch. If so, update the existing item instead
+    // of silently no-oping (addFeedback guards on duplicate ids). Also bail
+    // when the store was destroyed while suspended.
+    if (!this.taskSubsAlive) return;
+    if (this.feedback.some((f) => f.id === taskId)) {
+      this.updateFeedback(taskId, {
+        status,
+        kind: resolvedKind,
+        ...(summary !== undefined ? { summary } : {}),
+        ...(detail !== undefined ? { detail } : {}),
+      });
+      return;
+    }
+    const now = this.timestamp();
+    this.addFeedback({
+      id: taskId,
+      kind: resolvedKind,
+      status,
+      provider: "mock",
+      model: "mock-provider-v1",
+      range: { file: file ?? this.openFilePath ?? "", from: 0, to: 0 },
+      title: titleForKind(resolvedKind),
+      summary: summary ?? (status === "running" ? "Running..." : ""),
+      detail: detail ?? "",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  private timestamp(): number {
+    return Date.now();
   }
 
   // Mock re-run of a stale/errored item. Re-queues and simulates the async
