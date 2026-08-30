@@ -105,7 +105,10 @@ fn classify_and_emit(app: &tauri::AppHandle, root: &Path, event: &notify::Event)
     };
     match &change {
         ClassifiedChange::Config => {
-            let status = reload_config_state(&app.state::<ConfigState>(), Some(root));
+            let config_state = app.state::<ConfigState>();
+            let status = reload_config_state(&config_state, Some(root));
+            let llm_state = app.state::<crate::llm::LlmState>();
+            llm_state.set_provider(crate::llm::select_provider(config_state.mock_llm()));
             let _ = app.emit("config://changed", status);
         }
         ClassifiedChange::Structure => emit_watcher_change(app, &path, "structure"),

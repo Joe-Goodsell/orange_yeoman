@@ -24,6 +24,11 @@ struct ConfigFile {
     // an explicit false in the global config survives a partial project file.
     #[serde(default)]
     debug: Option<bool>,
+    // Same "not supplied" sentinel as debug: an absent mockLlm key is skipped
+    // by apply_file, so an explicit false in the global config survives a
+    // partial project file.
+    #[serde(default, rename = "mockLlm")]
+    mock_llm: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -58,6 +63,7 @@ pub(crate) struct ConfigStatus {
     configured_providers: Vec<String>,
     error: Option<String>,
     debug: bool,
+    mock_llm: bool,
 }
 
 // In-memory merged config held in Tauri state. API keys never leave this struct.
@@ -70,6 +76,7 @@ struct MergedConfig {
     project_path: Option<String>,
     error: Option<String>,
     debug: bool,
+    mock_llm: bool,
 }
 
 impl Default for MergedConfig {
@@ -83,6 +90,7 @@ impl Default for MergedConfig {
             project_path: None,
             error: None,
             debug: true,
+            mock_llm: true,
         }
     }
 }
@@ -105,6 +113,7 @@ impl From<&MergedConfig> for ConfigStatus {
             configured_providers,
             error: m.error.clone(),
             debug: m.debug,
+            mock_llm: m.mock_llm,
         }
     }
 }
@@ -140,6 +149,15 @@ impl ConfigState {
             .lock()
             .map(|m| m.debug)
             .unwrap_or_else(|e| e.into_inner().debug)
+    }
+
+    /// Current mock_llm flag from the merged config. Recovers the stored
+    /// value when the lock is poisoned instead of failing open.
+    pub(crate) fn mock_llm(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|m| m.mock_llm)
+            .unwrap_or_else(|e| e.into_inner().mock_llm)
     }
 }
 
@@ -197,6 +215,9 @@ fn apply_file(merged: &mut MergedConfig, file: &ConfigFile) {
     }
     if let Some(debug) = file.debug {
         merged.debug = debug;
+    }
+    if let Some(mock_llm) = file.mock_llm {
+        merged.mock_llm = mock_llm;
     }
 }
 
@@ -271,13 +292,19 @@ pub(crate) fn get_config_status(state: tauri::State<ConfigState>) -> ConfigStatu
 
 // Load (or clear) the repository config for the given root and refresh the
 // merged config. root = None clears the project portion of the config state.
+// The provider is re-selected from the mockLlm flag so a reload can switch
+// between the mock and the real provider. Tauri injects the state parameters;
+// the frontend IPC signature is unchanged.
 #[tauri::command]
 pub(crate) fn load_project_config(
     root: Option<String>,
     state: tauri::State<ConfigState>,
+    llm_state: tauri::State<'_, crate::llm::LlmState>,
 ) -> Result<ConfigStatus, String> {
     let root_path = root.as_deref().map(PathBuf::from);
-    Ok(reload_config_state(&state, root_path.as_deref()))
+    let status = reload_config_state(&state, root_path.as_deref());
+    llm_state.set_provider(crate::llm::select_provider(state.mock_llm()));
+    Ok(status)
 }
 
 // Validate two configured model strings against the available-models union
@@ -335,6 +362,7 @@ pub(crate) async fn validate_models(
             project_path: guard.project_path.clone(),
             error: guard.error.clone(),
             debug: guard.debug,
+            mock_llm: guard.mock_llm,
         };
         (
             guard.api_keys.clone(),

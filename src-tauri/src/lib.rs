@@ -34,7 +34,10 @@ pub fn run() {
             // Initialize the merged config with empty defaults plus the
             // global config. No config file is created; missing files are valid.
             // Any error is stored in status and the app continues.
-            config::reload_config_state(&app.state::<config::ConfigState>(), None);
+            let config_state = app.state::<config::ConfigState>();
+            let llm_state = app.state::<llm::LlmState>();
+            config::reload_config_state(&config_state, None);
+            llm_state.set_provider(llm::select_provider(config_state.mock_llm()));
             // Populate the telemetry layer's app handle so debug://event IPC
             // emission works from here on.
             telemetry::set_app_handle(app.handle().clone());
