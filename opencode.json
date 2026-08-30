@@ -36,7 +36,8 @@
           "implementation": "allow",
           "merge": "allow",
           "quick-implementation": "allow",
-          "review": "allow"
+          "review": "allow",
+          "pr": "allow"
         }
       }
     },
