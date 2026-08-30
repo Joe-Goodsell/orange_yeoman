@@ -88,3 +88,34 @@ File: `~/.opencode/plugins/worktree/terminal.ts`, function `openTmuxWindow`.
 - `onTaskUpdated` / `onResultReady` remain unsubscribed. Wiring them is the path to retire the frontend mock, but requires Rust to route `/research` and `/ignore` (currently `Ok(None)`) and confirmed event emission end-to-end.
 - `AgentPane.svelte` does not filter feedback by the open file. A future change may scope the pane to the current file or group by file.
 - No save action exists; local edits never reach the watcher. A save/persist path is a separate follow-up.
+
+# Memory: Replace custom markdown parser with markdown-rs (mdast adapter)
+
+## Project Findings
+- The custom line-based markdown parser in src-tauri/src/pipeline.rs was too ambitious for the CommonMark/GFM spec. It was replaced with `markdown::to_mdast` (markdown-rs 1.0.0, MIT; pulls `unicode-id`).
+- mdast `unist::Point.offset` is a BYTE offset into the source string, not a character index. `input[start..end]` slicing is safe on multi-byte UTF-8. Verified by a spike and locked in by the `multibyte_offsets_are_bytes` test in pipeline/tests.rs.
+- mdast API shape: the `Node` enum exposes `position()` and `children()` as methods, but the inner node structs (`ListItem`, `Yaml`, `Code`, `Heading`, etc.) carry `position: Option<Position>` as a public FIELD. Accessing a struct's position uses the field, not a method.
+- Canonical parse config: `markdown::ParseOptions { constructs: markdown::Constructs { frontmatter: true, ..markdown::Constructs::gfm() }, ..markdown::ParseOptions::default() }`. This enables GFM tables and `---` frontmatter on top of CommonMark defaults. `to_mdast` errors only on MDX, so `.expect()`/`.unwrap()` is safe for normal markdown.
+- mdast block positions include their closing delimiters: `Code` includes the closing fence, `Yaml`/`Toml` includes the closing `---`, `Blockquote` includes the `>` marker. `List` positions include a trailing newline; loose `ListItem` positions end with `\n` (tight items do not). All slice back exactly via `input[start..end]`.
+
+## Key Decisions
+- Option A adapter approach: keep the existing `MarkdownBlock` / `BlockKind` interface intact and reimplement only `parse_markdown_blocks` as a `to_mdast` tree-walk. `tasks.rs` and all downstream code stayed byte-for-byte unchanged. Rationale: `heading_chain` (all preceding heading texts in document order) is the one field not derivable from a single mdast node; producing it forces a walk-and-attach step regardless, so keeping the other derived fields (`text`, `block_hash`, `excluded`) on the same struct avoids reworking every consumer for no functional gain.
+- `block.text` always equals `input[start..end]` (never trimmed). The `input[block.start..block.end] == block.text` invariant is the load-bearing contract for staleness checks in tasks.rs.
+- Top-level node mapping: Heading -> Heading (then push `collect_text(node)` to the chain AFTER emitting, so a heading's own chain excludes itself); Paragraph/Blockquote/Table -> one block each; Yaml|Toml -> excluded FrontMatter; Code -> excluded CodeFence; Html -> excluded Html; List -> flattened to one ListItem block per child using each ListItem's own position; all other top-level nodes (ThematicBreak, Definition, FootnoteDefinition, Math, MDX nodes) -> skipped. Headings nested inside blockquotes/lists never reach the top-level walk and never update the chain, matching old behavior.
+- `collect_text` rebuilds plain text from inline `Text` descendants, dropping formatting markers (`## **Bold**` -> chain entry `Bold`). Accepted; the chain feeds only fact-check prompt context.
+
+## Assumptions
+- No persisted data depends on old `block_hash` values; `TaskStore` is in-memory, so the hash-identity changes from spec-correct block boundaries do not require migration.
+- The app parses user `.md` notes (normal markdown), never MDX, so `to_mdast` never errors in practice.
+
+## Trade-offs
+- Chose the adapter (Option A) over reworking consumers to use `mdast::Node` directly (Option B). Cost: a thin projection layer (`emit_blocks`/`push_block`/`collect_text`) lives in pipeline.rs. Benefit: tasks.rs, routing, envelopes, and their tests are untouched; the blast radius is the parser internals plus two test files. Option B would have required a heading-chain side-channel (`HashMap` keyed by offset) anyway, so it would not have eliminated a derived struct.
+- Accepted spec-correct behavior deltas (the intended payoff of the switch): mid-document `---` is now `ThematicBreak` (was `Paragraph`); `foo: bar\n---` is a setext `Heading`; 4-space indented code is now excluded `CodeFence` (was a scored `Paragraph`); nested/loose list items merge into one `ListItem` block per item; malformed/unclosed frontmatter no longer consumes to EOF as an excluded block. These change `block_hash` identities for those inputs and are acceptable.
+- Added `markdown` + `unicode-id` as deps, ending the old parser's "no dependencies beyond std" purity.
+
+## User Feedback
+- The user challenged keeping `MarkdownBlock` and asked whether the crate exposes a block type. Clarified that mdast exposes a recursive tree (`Node`), not a flat block type; downstream iterates a flat list, so a tree-to-list projection is unavoidable. `heading_chain` is the field that forces the projection. User then approved Option A explicitly.
+
+## Implementation Blockers / Open Follow-ups
+- Pre-existing dead-code warnings for `decision_trigger` (pipeline.rs) and `PROMPT_SCHEMA_VERSION` (pipeline.rs) are unrelated to this change and were intentionally not fixed.
+- GFM tables require a delimiter row; pipe-prefixed lines without one parse as `Paragraph` (correct, but no test pins it).

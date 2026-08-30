@@ -1,13 +1,11 @@
-// Orange Yeoman - Markdown block pipeline. Phase 1 is a bounded, line-based
-// parser that splits a Markdown string into blocks with exact byte offsets,
-// heading chains, and exclusion flags. It is intentionally simple: blank lines
-// are the primary separator, and line-prefix rules classify each block kind.
-// The parser is pure and has no dependencies beyond std.
+// Orange Yeoman - Markdown block pipeline. Parsing is delegated to the
+// `markdown` crate (CommonMark + GFM + frontmatter); this module projects the
+// resulting mdast tree into flat MarkdownBlocks with exact byte offsets,
+// heading chains, and exclusion flags.
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlockKind {
@@ -43,195 +41,150 @@ pub(crate) fn stable_hash(text: &str) -> String {
 /// Parse a Markdown string into blocks with exact byte offsets, heading chains,
 /// and exclusion flags. Offsets are byte offsets into the input string.
 pub(crate) fn parse_markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
-    let lines = line_spans(input);
-
-    // Front matter is recognized only when the first non-blank line of the
-    // input is exactly "---" (rule 6).
-    let front_matter_idx = lines
-        .iter()
-        .position(|l| !l.text.is_empty())
-        .filter(|&idx| lines[idx].text == "---");
-
+    let opts = markdown::ParseOptions {
+        constructs: markdown::Constructs {
+            frontmatter: true,
+            ..markdown::Constructs::gfm()
+        },
+        ..markdown::ParseOptions::default()
+    };
+    let tree = markdown::to_mdast(input, &opts).expect("markdown never errors on normal input");
+    let markdown::mdast::Node::Root(root) = tree else {
+        return Vec::new();
+    };
     let mut blocks = Vec::new();
-    // Phase 1 heading_chain rule: the sequence of all preceding heading texts
-    // in document order (the simpler rule allowed by the spec).
     let mut chain: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].text.is_empty() {
-            // Blank line: block separator.
-            i += 1;
-            continue;
-        }
-        match classify(&lines[i], front_matter_idx == Some(i)) {
-            LineKind::Heading(level) => {
-                // The block text keeps the "# " markers; the chain stores the
-                // stripped heading text.
-                let heading_text = lines[i].text[level + 1..].to_string();
-                emit_block(&mut blocks, BlockKind::Heading, &lines, i..i + 1, &chain);
-                chain.push(heading_text);
-                i += 1;
-            }
-            LineKind::ListItem => {
-                // Each list item line is its own block (rule 3). The block text
-                // keeps the "- " / "* " marker, consistent with headings.
-                emit_block(&mut blocks, BlockKind::ListItem, &lines, i..i + 1, &chain);
-                i += 1;
-            }
-            LineKind::BlockQuote => {
-                let mut j = i + 1;
-                while j < lines.len() && lines[j].text.starts_with('>') {
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::BlockQuote, &lines, i..j, &chain);
-                i = j;
-            }
-            LineKind::Table => {
-                // Consecutive "|" lines form one table block (rule 5).
-                let mut j = i + 1;
-                while j < lines.len() && lines[j].text.starts_with('|') {
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::Table, &lines, i..j, &chain);
-                i = j;
-            }
-            LineKind::FrontMatter => {
-                let mut j = i + 1;
-                while j < lines.len() && lines[j].text != "---" {
-                    j += 1;
-                }
-                if j < lines.len() {
-                    // Include the closing "---" line.
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::FrontMatter, &lines, i..j, &chain);
-                i = j;
-            }
-            LineKind::CodeFence => {
-                let mut j = i + 1;
-                while j < lines.len() && !lines[j].text.starts_with("```") {
-                    j += 1;
-                }
-                if j < lines.len() {
-                    // Include the closing fence line.
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::CodeFence, &lines, i..j, &chain);
-                i = j;
-            }
-            LineKind::Html => {
-                // An HTML block starts on a "<" line and ends at the next blank
-                // line (rule 8).
-                let mut j = i + 1;
-                while j < lines.len() && !lines[j].text.is_empty() {
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::Html, &lines, i..j, &chain);
-                i = j;
-            }
-            LineKind::Paragraph => {
-                let mut j = i + 1;
-                while j < lines.len() {
-                    if lines[j].text.is_empty()
-                        || !matches!(classify(&lines[j], false), LineKind::Paragraph)
-                    {
-                        break;
-                    }
-                    j += 1;
-                }
-                emit_block(&mut blocks, BlockKind::Paragraph, &lines, i..j, &chain);
-                i = j;
-            }
-        }
+    for child in &root.children {
+        emit_blocks(&mut blocks, child, input, &mut chain);
     }
     blocks
 }
 
-/// A single line of the input: its byte start offset and its text without the
-/// trailing newline.
-struct LineSpan<'a> {
-    start: usize,
-    text: &'a str,
-}
+/// Map one top-level mdast node to one or more MarkdownBlocks. Headings also
+/// update the heading chain; lists flatten to one block per list item. Nodes
+/// without a matching block kind (ThematicBreak, Definition,
+/// FootnoteDefinition, Math, MDX) are skipped: they are not content we
+/// fact-check.
+fn emit_blocks(
+    blocks: &mut Vec<MarkdownBlock>,
+    node: &markdown::mdast::Node,
+    input: &str,
+    chain: &mut Vec<String>,
+) {
+    use markdown::mdast::Node;
 
-/// Split the input into lines at every '\n'. The final entry is the text after
-/// the last newline and may be empty when the input ends with a newline.
-fn line_spans(input: &str) -> Vec<LineSpan<'_>> {
-    let mut spans = Vec::new();
-    let mut start = 0;
-    for (i, b) in input.bytes().enumerate() {
-        if b == b'\n' {
-            spans.push(LineSpan {
-                start,
-                text: &input[start..i],
-            });
-            start = i + 1;
+    match node {
+        Node::Heading(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::Heading,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+            chain.push(collect_text(node));
         }
+        Node::Paragraph(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::Paragraph,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::Blockquote(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::BlockQuote,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::Table(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::Table,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::Yaml(_) | Node::Toml(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::FrontMatter,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::Code(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::CodeFence,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::Html(_) => {
+            let pos = node.position().expect("mdast nodes have positions");
+            push_block(
+                blocks,
+                BlockKind::Html,
+                input,
+                pos.start.offset,
+                pos.end.offset,
+                chain,
+            );
+        }
+        Node::List(list) => {
+            // Each list item is its own block, using the list item's own
+            // position (which includes its marker and content).
+            for item in &list.children {
+                let Node::ListItem(li) = item else {
+                    continue;
+                };
+                let pos = li.position.as_ref().expect("mdast nodes have positions");
+                push_block(
+                    blocks,
+                    BlockKind::ListItem,
+                    input,
+                    pos.start.offset,
+                    pos.end.offset,
+                    chain,
+                );
+            }
+        }
+        _ => {}
     }
-    spans.push(LineSpan {
-        start,
-        text: &input[start..],
-    });
-    spans
 }
 
-/// The classification of a single line, used to drive block construction.
-enum LineKind {
-    Heading(usize),
-    ListItem,
-    BlockQuote,
-    Table,
-    FrontMatter,
-    CodeFence,
-    Html,
-    Paragraph,
-}
-
-fn classify(line: &LineSpan<'_>, is_front_matter: bool) -> LineKind {
-    let t = line.text;
-    if is_front_matter {
-        return LineKind::FrontMatter;
-    }
-    // Heading: one or more '#' followed by a space (rule 2).
-    let hashes = t.bytes().take_while(|&b| b == b'#').count();
-    if hashes > 0 && t.len() > hashes && t.as_bytes()[hashes] == b' ' {
-        return LineKind::Heading(hashes);
-    }
-    if t.starts_with("- ") || t.starts_with("* ") {
-        return LineKind::ListItem;
-    }
-    if t.starts_with('>') {
-        return LineKind::BlockQuote;
-    }
-    if t.starts_with('|') {
-        return LineKind::Table;
-    }
-    if t.starts_with("```") {
-        return LineKind::CodeFence;
-    }
-    if t.starts_with('<') {
-        return LineKind::Html;
-    }
-    LineKind::Paragraph
-}
-
-/// Build one block from `lines[range]` and append it. The block text is the
-/// range's lines joined with '\n', which exactly equals `&input[start..end]`
-/// because consecutive lines in the input are separated by single '\n' bytes.
-fn emit_block(
+/// Compute one block from a byte span of the input and push it. The block text
+/// is exactly `input[start..end]`; offsets are byte offsets.
+fn push_block(
     blocks: &mut Vec<MarkdownBlock>,
     kind: BlockKind,
-    lines: &[LineSpan<'_>],
-    range: Range<usize>,
+    input: &str,
+    start: usize,
+    end: usize,
     chain: &[String],
 ) {
-    let start = lines[range.start].start;
-    let end = lines[range.end - 1].start + lines[range.end - 1].text.len();
-    let text = lines[range]
-        .iter()
-        .map(|l| l.text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = input[start..end].to_string();
     let excluded = matches!(
         kind,
         BlockKind::FrontMatter | BlockKind::CodeFence | BlockKind::Html
@@ -246,6 +199,19 @@ fn emit_block(
         excluded,
         block_hash,
     });
+}
+
+/// Rebuild the plain text of a node from its inline children, dropping
+/// formatting markers (e.g. "## H2 **bold**" -> "H2 bold").
+fn collect_text(node: &markdown::mdast::Node) -> String {
+    use markdown::mdast::Node;
+    match node {
+        Node::Text(t) => t.value.clone(),
+        other => other
+            .children()
+            .map(|kids| kids.iter().map(collect_text).collect::<String>())
+            .unwrap_or_default(),
+    }
 }
 
 /// A slash command as defined by the app's command model. Commands are

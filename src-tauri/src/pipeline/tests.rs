@@ -137,6 +137,24 @@ fn offsets_slice_to_block_text() {
     }
 }
 
+// mdast Point.offset values are byte offsets, not char offsets: the heading
+// "# Título con ñ" spans bytes 0..16 (14 chars) and the paragraph
+// "Un párrafo con é." spans bytes 18..37. Each block must slice back to its
+// exact text.
+#[test]
+fn multibyte_offsets_are_bytes() {
+    let input = "# Título con ñ\n\nUn párrafo con é.";
+    let blocks = parse_markdown_blocks(input);
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].kind, BlockKind::Heading);
+    assert_eq!(blocks[1].kind, BlockKind::Paragraph);
+    for block in &blocks {
+        assert_eq!(&input[block.start..block.end], block.text);
+    }
+    assert_eq!(blocks[0].text, "# Título con ñ");
+    assert_eq!(blocks[1].text, "Un párrafo con é.");
+}
+
 // --- inline slash command tests ---
 //
 // The v1 model: a command token may appear anywhere in a line, the whole line
