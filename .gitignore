@@ -1,11 +1,38 @@
+# macOS / OS cruft
 .DS_Store
+
+# Dependencies
 node_modules
+
+# SvelteKit / Vite build output
 /build
 /.svelte-kit
 /package
+dist/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Logs
+*.log
+pnpm-debug.log*
+
+# Env / secrets
 .env
 .env.*
 !.env.example
+
+# App-local config (example is tracked)
 .orange-yeoman.json
+
+# Vite timestamp files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Editor / IDE local config (extensions.json team recommendations stay tracked)
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Agent session memory (local working state)
+memories/
