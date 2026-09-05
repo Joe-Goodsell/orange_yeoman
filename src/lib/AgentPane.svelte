@@ -105,10 +105,10 @@
         <p class="config-ok">Defaults active</p>
       {/if}
       <p class="config-line">
-        Small model: <span class="mono">{project.configStatus.small_model}</span>
+        Small model: <span class="mono">{project.configStatus.small_model}</span>{#if project.configStatus.small_provider} <span class="mono">({project.configStatus.small_provider})</span>{/if}
       </p>
       <p class="config-line">
-        Large model: <span class="mono">{project.configStatus.large_model}</span>
+        Large model: <span class="mono">{project.configStatus.large_model}</span>{#if project.configStatus.large_provider} <span class="mono">({project.configStatus.large_provider})</span>{/if}
       </p>
       <p class="config-line">
         Providers:

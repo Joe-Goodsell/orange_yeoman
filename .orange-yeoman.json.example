@@ -4,8 +4,8 @@
     "deepseek": "YOUR_DEEPSEEK_API_KEY"
   },
   "models": {
-    "small": "deepseek-v4-flash",
-    "large": "openai-codex-5.6"
+    "small": { "provider": "deepseek", "id": "deepseek-v4-flash" },
+    "large": { "provider": "openai", "id": "openai-codex-5.6" }
   },
   "mockLlm": true,
   "debug": true

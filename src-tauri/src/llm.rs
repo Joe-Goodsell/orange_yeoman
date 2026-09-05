@@ -121,6 +121,13 @@ pub(crate) trait LlmProvider: Send + Sync {
         &self,
         request: LlmRequest,
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse, LlmError>> + Send + '_>>;
+
+    /// The model id this provider serves regardless of the request's model
+    /// hint, or None when it serves the request's configured model. The mock
+    /// returns "mock-provider-v1" so debug output identifies mock calls.
+    fn serving_model(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 // Deterministic mock provider. Returns readable placeholder text marked
@@ -193,6 +200,10 @@ impl LlmProvider for MockProvider {
         request: LlmRequest,
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse, LlmError>> + Send + '_>> {
         Box::pin(async move { mock_complete(request) })
+    }
+
+    fn serving_model(&self) -> Option<&'static str> {
+        Some(MOCK_MODEL)
     }
 }
 

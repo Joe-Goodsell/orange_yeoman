@@ -63,7 +63,30 @@ fn spec_for(provider: &str) -> Option<ProviderSpec> {
             auth: AuthStyle::QueryKey { param: "key" },
             id_path: IdPath::Gemini,
         }),
+        // DeepSeek's API is OpenAI-compatible: Bearer auth and a data[].id
+        // response shape on GET https://api.deepseek.com/models.
+        "deepseek" => Some(ProviderSpec {
+            models_url: "https://api.deepseek.com/models",
+            auth: AuthStyle::BearerHeader,
+            id_path: IdPath::OpenAi,
+        }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The catalog covers every provider the example config and the UI can
+    // name. Unknown provider keys resolve to None so validation treats them
+    // as unresolvable instead of guessing an endpoint.
+    #[test]
+    fn spec_for_covers_known_providers() {
+        for provider in ["openai", "anthropic", "openrouter", "gemini", "deepseek"] {
+            assert!(spec_for(provider).is_some(), "missing provider: {provider}");
+        }
+        assert!(spec_for("unknown-provider").is_none());
     }
 }
 

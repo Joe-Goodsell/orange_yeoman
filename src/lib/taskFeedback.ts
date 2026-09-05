@@ -81,26 +81,6 @@ export function commandNameToFeedbackKind(name: string): FeedbackKind | null {
 }
 
 /**
- * Best-effort map from a Rust Trigger string to a FeedbackKind. Used only in
- * the defensive adopt path where a result arrived with no prior event or
- * registration, so the kind must be inferred from metadata.
- */
-export function triggerToFeedbackKind(trigger: string): FeedbackKind {
-  switch (trigger) {
-    case "fact_check":
-      return "fact-check";
-    case "research":
-      return "research";
-    case "inline":
-      // Inline is currently only fact-check; research and ignore are roadmap.
-      return "fact-check";
-    default:
-      // automatic and command_line use extraction, which maps to correction.
-      return "correction";
-  }
-}
-
-/**
  * A short title for a feedback card of the given kind.
  */
 export function titleForKind(kind: FeedbackKind): string {
@@ -119,10 +99,10 @@ export function titleForKind(kind: FeedbackKind): string {
 /**
  * Extract a human-readable summary and detail from a task result payload.
  *
- * The mock provider returns three structured shapes:
- * - fact_check: { mock, checks: [{ id, claim, verdict, sources }] }
- * - research:   { mock, topics: [{ id, query, status, sources }] }
- * - extraction: { mock, claims: [{ id, text, confidence, sources }] }
+ * The Rust MockProvider returns one generic shape for every request kind:
+ * { schema_version, mock: true, text }. The checks/topics/claims branches
+ * below describe expected real-provider result shapes and stay for that
+ * future.
  *
  * For errors, the error string becomes the detail. For null or unknown
  * shapes, a generic fallback is returned so nothing is silently dropped.
@@ -143,6 +123,12 @@ export function describeTaskResult(
 
   const parsed = result as Record<string, unknown>;
   const isMock = parsed.mock === true;
+
+  // Generic mock shape from the Rust MockProvider: { schema_version, mock,
+  // text }. Shown as readable text instead of a raw JSON dump.
+  if (isMock && typeof parsed.text === "string") {
+    return { summary: "Mock provider output.", detail: parsed.text };
+  }
 
   // Fact-check: array of checks with claim + verdict.
   if (Array.isArray(parsed.checks)) {

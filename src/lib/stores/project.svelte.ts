@@ -21,7 +21,6 @@ import {
   requestKindToFeedbackKind,
   taskStatusToFeedbackStatus,
   titleForKind,
-  triggerToFeedbackKind,
 } from "../taskFeedback";
 
 const STORAGE_KEY = "orange-yeoman:project-root";
@@ -307,11 +306,12 @@ class ProjectStore {
   // item with the mock result text, or adopts when no prior item exists.
   applyTaskResult(result: TaskResult) {
     const status = taskStatusToFeedbackStatus(result.status);
+    const kind = requestKindToFeedbackKind(result.kind);
     const { summary, detail } = describeTaskResult(result.result, result.error);
     if (this.feedback.some((f) => f.id === result.taskId)) {
       this.updateFeedback(result.taskId, { status, summary, detail });
     } else {
-      void this.adoptTask(result.taskId, "correction", status, summary, detail);
+      void this.adoptTask(result.taskId, kind, status, summary, detail);
     }
   }
 
@@ -331,11 +331,6 @@ class ProjectStore {
       const meta = await getTaskStatus(taskId);
       if (meta) {
         file = meta.filePath;
-        // For the result-adopt path the kind was a default; refine it from
-        // the trigger if metadata is available.
-        if (summary !== undefined) {
-          resolvedKind = triggerToFeedbackKind(meta.trigger);
-        }
       }
     } catch {
       // metadata fetch failed; use the open file as a best guess
@@ -390,76 +385,28 @@ class ProjectStore {
   }
 
   // Dispatch a mock feedback item for a detected slash command. The range
-  // anchors the item to the paragraph the command was typed in. Task commands
-  // (/fact-check, /research) simulate the async lifecycle (queued -> running
-  // -> arrived) with timers, mirroring requeueFeedback; /ignore is a
-  // directive that arrives immediately. Unrecognized names do nothing.
+  // anchors the item to the paragraph the command was typed in. Rust
+  // dispatches /fact-check and /research through the task pipeline, so only
+  // /ignore falls back here; its card arrives immediately because /ignore is
+  // a directive. Unrecognized names do nothing.
   dispatchMockFeedback(command: { name: string }, range: SourceRange): void {
-    const kind =
-      command.name === "/fact-check"
-        ? "fact-check"
-        : command.name === "/research"
-          ? "research"
-          : command.name === "/ignore"
-            ? "ignore"
-            : null;
-    if (!kind) return;
-
-    const content: Record<
-      "fact-check" | "research" | "ignore",
-      { title: string; summary: string; detail: string }
-    > = {
-      "fact-check": {
-        title: "Fact-check: mock result",
-        summary:
-          "Mock fact-check complete. 2 sources support the claim, 1 refutes it.",
-        detail: "",
-      },
-      research: {
-        title: "Research: mock results",
-        summary: "Mock research gathered 3 background sources.",
-        detail: "",
-      },
-      ignore: {
-        title: "Ignore: block excluded",
-        summary:
-          "This block is excluded from automatic research and fact-checking.",
-        detail:
-          "Marked as ignored. No agent activity will run on this block. Remove the /ignore command to re-enable automatic processing.",
-      },
-    };
-    const arrivedDetail: Record<"fact-check" | "research", string> = {
-      "fact-check":
-        "Mock sources reviewed:\n1. Source A - supports (confidence 0.91).\n2. Source B - supports (confidence 0.86).\n3. Source C - refutes (confidence 0.74).\nThe claim is mostly supported. One source refutes it; review before citing.",
-      research:
-        "Mock background sources:\n1. A 2023 overview article.\n2. A primary source document.\n3. A recent survey paper.\nThese are ready to cite in the note.",
-    };
-
-    const id = `mock-${kind}-${Date.now()}`;
+    if (command.name !== "/ignore") return;
     const now = Date.now();
     this.addFeedback({
-      id,
-      kind,
-      status: kind === "ignore" ? "arrived" : "queued",
+      id: `mock-ignore-${now}`,
+      kind: "ignore",
+      status: "arrived",
       provider: "mock",
       model: "mock-1",
       range,
-      title: content[kind].title,
-      summary: content[kind].summary,
-      detail: content[kind].detail,
+      title: "Ignore: block excluded",
+      summary:
+        "This block is excluded from automatic research and fact-checking.",
+      detail:
+        "Marked as ignored. No agent activity will run on this block. Remove the /ignore command to re-enable automatic processing.",
       createdAt: now,
       updatedAt: now,
     });
-    if (kind === "ignore") return;
-    window.setTimeout(() => {
-      this.updateFeedback(id, { status: "running" });
-    }, 700);
-    window.setTimeout(() => {
-      this.updateFeedback(id, {
-        status: "arrived",
-        detail: arrivedDetail[kind],
-      });
-    }, 1800);
   }
 
   // Map the source ranges of feedback items for one file through a document

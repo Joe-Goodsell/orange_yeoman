@@ -427,6 +427,39 @@ fn inline_task_id_distinct_for_same_focus_different_blocks() {
     assert_ne!(inline_task_id(&e1), inline_task_id(&e2));
 }
 
+// The command name is part of the identity: for the same block and the same
+// focus text, an inline /fact-check and an inline /research command produce
+// distinct task ids, so the two inline dispatch paths never overwrite each
+// other in the task store.
+#[test]
+fn inline_task_id_distinct_for_fact_check_vs_research() {
+    let block = command_block("Lead-in line.\n/fact-check apples.\nTrailing line.");
+    let parsed_fc = parse_slash_command_in_block(&block).expect("command should parse");
+    let fc_envelope = build_inline_envelope(&block, &parsed_fc, None);
+
+    // The same command line routed as /research: same block hash, same focus
+    // text, only the command name differs.
+    let parsed_research = ParsedSlashCommand {
+        command: SlashCommand::Research,
+        focus_text: parsed_fc.focus_text.clone(),
+        selector: None,
+        line_start: parsed_fc.line_start,
+        line_end: parsed_fc.line_end,
+        block_hash: parsed_fc.block_hash.clone(),
+    };
+    let research_envelope = build_inline_envelope(&block, &parsed_research, None);
+
+    assert_eq!(
+        fc_envelope.focus_ref.block_hash,
+        research_envelope.focus_ref.block_hash
+    );
+    assert_eq!(fc_envelope.focus_text, research_envelope.focus_text);
+    assert_ne!(
+        inline_task_id(&fc_envelope),
+        inline_task_id(&research_envelope)
+    );
+}
+
 // --- classify_block signal tests ---
 
 // A paragraph block classified with all unused fields zeroed/empty.

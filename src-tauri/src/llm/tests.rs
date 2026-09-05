@@ -200,3 +200,19 @@ fn select_provider_false_real_provider_errors() {
         .expect_err("empty prompt must be rejected");
     assert!(matches!(empty_err, LlmError::EmptyUserPrompt));
 }
+
+// The mock provider reports a fixed model identity so debug output can
+// identify mock calls regardless of the request's model hint.
+#[test]
+fn select_provider_true_serves_mock_model() {
+    let provider = select_provider(true);
+    assert_eq!(provider.serving_model(), Some("mock-provider-v1"));
+}
+
+// The real provider serves the request's configured model, so it reports no
+// fixed model identity.
+#[test]
+fn select_provider_false_serves_no_fixed_model() {
+    let provider = select_provider(false);
+    assert_eq!(provider.serving_model(), None);
+}
