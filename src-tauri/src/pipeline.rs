@@ -4,8 +4,6 @@
 // heading chains, and exclusion flags.
 
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlockKind {
@@ -31,11 +29,34 @@ pub(crate) struct MarkdownBlock {
 }
 
 /// Stable hash of a string, returned as a lowercase hex string.
-/// Use std::collections::hash_map::DefaultHasher. Must be deterministic within a run.
+/// FNV-1a 64-bit (offset basis 0xcbf29ce484222325, prime 0x100000001b3).
+/// Deterministic across Rust releases and process restarts, so block hashes
+/// survive the app being rebuilt or restarted and can anchor the concept store.
 pub(crate) fn stable_hash(text: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
+}
+
+/// Serialize a BlockKind to its stable text spelling for the `blocks.kind`
+/// column. Round-trip with `block_kind_from_str` is not required: the kind is
+/// stored for later stages and never used to drive diff/apply logic.
+pub(crate) fn block_kind_as_str(kind: &BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Heading => "heading",
+        BlockKind::Paragraph => "paragraph",
+        BlockKind::ListItem => "list_item",
+        BlockKind::BlockQuote => "block_quote",
+        BlockKind::Table => "table",
+        BlockKind::FrontMatter => "front_matter",
+        BlockKind::CodeFence => "code_fence",
+        BlockKind::Html => "html",
+    }
 }
 
 /// Parse a Markdown string into blocks with exact byte offsets, heading chains,
