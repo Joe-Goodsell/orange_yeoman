@@ -6,8 +6,10 @@
 
 mod config;
 mod filesystem;
+mod incremental;
 mod llm;
 mod pipeline;
+mod store;
 mod tasks;
 mod telemetry;
 mod watcher;
@@ -30,6 +32,7 @@ pub fn run() {
         .manage(config::ConfigState::default())
         .manage(llm::LlmState::default())
         .manage(Arc::new(tasks::TaskStore::default()))
+        .manage(store::StoreState::new())
         .setup(|app| {
             // Initialize the merged config with empty defaults plus the
             // global config. No config file is created; missing files are valid.
@@ -38,6 +41,11 @@ pub fn run() {
             let llm_state = app.state::<llm::LlmState>();
             config::reload_config_state(&config_state, None);
             llm_state.set_provider(llm::select_provider(config_state.mock_llm()));
+            // Open the concept store DB next to the global config. On failure
+            // the connection stays None inside StoreState and processing
+            // no-ops; the app keeps running.
+            let store_state = app.state::<store::StoreState>();
+            store_state.open();
             // Populate the telemetry layer's app handle so debug://event IPC
             // emission works from here on.
             telemetry::set_app_handle(app.handle().clone());
