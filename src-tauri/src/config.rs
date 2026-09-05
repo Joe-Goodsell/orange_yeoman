@@ -169,8 +169,14 @@ impl Default for ConfigState {
     }
 }
 
+// Resolve the app's data directory. macOS: ~/Library/Application Support/Orange
+// Yeoman. The global config file and the concept store DB share this directory.
+pub(crate) fn app_data_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join("Library/Application Support/Orange Yeoman"))
+}
+
 fn global_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join("Library/Application Support/Orange Yeoman/config.json"))
+    app_data_dir().map(|dir| dir.join("config.json"))
 }
 
 // Sanitize a JSON parse error into a safe message. Raw serde error text can
