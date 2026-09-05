@@ -1,8 +1,9 @@
-// Orange Yeoman - Rust core. Filesystem access (list_dir, read_text_file), the
-// dialog plugin (native folder picker), and the file watcher (notify +
-// notify-debouncer-full) are wired here. The watcher emits Tauri events on the
-// "watcher://change" channel with a { path, kind } payload where kind is
-// "structure" (create/remove/rename) or "content" (.md data modify).
+// Orange Yeoman - Rust core. Filesystem access (list_dir, read_text_file,
+// write_text_file), the dialog plugin (native folder picker), and the file
+// watcher (notify + notify-debouncer-full) are wired here. The watcher emits
+// Tauri events on the "watcher://change" channel with a { path, kind } payload
+// where kind is "structure" (create/remove/rename) or "content" (.md data
+// modify).
 
 mod config;
 mod filesystem;
@@ -57,6 +58,7 @@ pub fn run() {
             config::validate_models,
             filesystem::list_dir,
             filesystem::read_text_file,
+            filesystem::write_text_file,
             llm::complete_llm,
             tasks::submit_block,
             tasks::submit_fact_check,

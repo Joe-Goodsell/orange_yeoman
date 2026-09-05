@@ -1,5 +1,6 @@
-// Filesystem commands: directory listing and plain text file reads. The folder
-// tree mirrors on-disk structure exactly; there is no app-owned note database.
+// Filesystem commands: directory listing, plain text file reads, and plain
+// text file writes. The folder tree mirrors on-disk structure exactly; there is
+// no app-owned note database.
 
 use serde::Serialize;
 use std::fs;
@@ -39,3 +40,15 @@ pub(crate) fn list_dir(dir: String) -> Result<Vec<FileEntry>, String> {
 pub(crate) fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub(crate) fn write_text_file(path: String, contents: String) -> Result<String, String> {
+    // A single fs::write keeps the event stream as debounced Data-modify
+    // events; an atomic temp+rename scheme would surface as rename events
+    // instead, which the watcher classifies differently.
+    fs::write(&path, &contents).map_err(|e| e.to_string())?;
+    Ok(crate::pipeline::stable_hash(&contents))
+}
+
+#[cfg(test)]
+mod tests;

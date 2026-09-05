@@ -1,13 +1,19 @@
 // File watcher built on notify + notify-debouncer-full. Events are classified
 // by a pure function and emitted on the "watcher://change" channel with a
-// { path, kind } payload where kind is "structure" (create/remove/rename) or
-// "content" (.md data modify). Changes to the active root's .orange-yeoman.json
-// reload the merged config and emit "config://changed". When the debug config
-// flag is on, content changes also emit per-block add/remove/change events so
-// the debug console can show exactly what the watcher saw on disk.
+// { path, kind, hash } payload where kind is "structure" (create/remove/rename)
+// or "content" (.md data modify). The optional hash is the stable content hash
+// of the new on-disk bytes; it is present only on content events so the
+// frontend can recognize its own writes. Structure arms also keep the concept
+// store in sync: creates ingest the new file, removes drop stored blocks,
+// matched renames relink blocks to the new path, and unmatched single-path
+// renames fall back to drop + reprocess. Changes to the active root's
+// .orange-yeoman.json reload the merged config and emit "config://changed".
+// When the debug config flag is on, content changes also emit per-block
+// add/remove/change events so the debug console can show exactly what the
+// watcher saw on disk.
 
 use crate::config::{reload_config_state, ConfigState, CONFIG_FILE_NAME};
-use crate::store::{process_file_content, remove_all_blocks_for_path, relink_blocks, StoreState};
+use crate::store::{process_file_content, relink_blocks, remove_all_blocks_for_path, StoreState};
 use notify::event::{EventKind, ModifyKind, RenameMode};
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
@@ -24,6 +30,11 @@ use tauri::{Emitter, Manager};
 struct WatcherEvent {
     path: String,
     kind: String,
+    // Stable content hash of the new on-disk bytes. Present only on content
+    // events; omitted from JSON otherwise so existing frontend consumers stay
+    // compatible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
 }
 
 // The debounced watcher type. RecommendedCache is the platform default file ID
@@ -141,6 +152,15 @@ fn is_markdown(path: &Path) -> bool {
     path.extension()
         .map(|e| e.eq_ignore_ascii_case("md"))
         .unwrap_or(false)
+}
+
+// Stable content hash of a file for the watcher event payload, or None when
+// the file cannot be read (e.g. transiently mid-save). The frontend compares
+// this against the hash of its own last save to recognize self-writes.
+fn content_hash(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|content| crate::pipeline::stable_hash(&content))
 }
 
 // Debug-only block snapshot. The hash identifies a block across edits (see
@@ -328,23 +348,78 @@ fn classify_and_emit(app: &tauri::AppHandle, root: &Path, event: &notify::Event)
                 config_state.debug()
             );
         }
-        ClassifiedChange::Structure => {
-            emit_watcher_change(app, &path, "structure");
+        ClassifiedChange::Structure(path) => {
+            emit_watcher_change(app, &path, "structure", None);
             // Any structure event (create/remove/rename) invalidates the block
             // cache entry: the cached snapshot no longer matches the file.
             app.state::<WatcherState>()
                 .block_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&path);
+                .remove(path);
             tracing::info!(category = "watcher", "structure change: {}", path.display());
+            // A rename whose sides notify-debouncer-full could not match: the
+            // carried path may be the old or the new name, so drop stale rows
+            // for it and then re-process the content.
+            spawn_rename_fallback(app, path.clone());
         }
-        ClassifiedChange::Content => {
-            emit_watcher_change(app, &path, "content");
+        ClassifiedChange::Content(path) => {
+            // The hash stamps the new on-disk content so the frontend can
+            // recognize this editor's own writes. emit_block_diffs reads the
+            // file again and already handles transient failures; a failed hash
+            // read just omits the hash.
+            let hash = content_hash(path);
+            emit_watcher_change(app, &path, "content", hash);
             tracing::info!(category = "watcher", "content change: {}", path.display());
             // Block-level diffs follow the file-level event so the console
             // shows the summary line before the per-block detail.
             emit_block_diffs(app, &path);
+            // Ingest the disk change into the concept store; the pipeline
+            // reads disk state, so the store must track it.
+            spawn_content_processing(app, path.clone());
+        }
+        ClassifiedChange::Create(path) => {
+            emit_watcher_change(app, &path, "structure", None);
+            // The cached snapshot no longer matches the file: invalidate it.
+            app.state::<WatcherState>()
+                .block_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(path);
+            tracing::info!(category = "watcher", "created: {}", path.display());
+            if is_markdown(path) {
+                spawn_content_processing(app, path.clone());
+            }
+        }
+        ClassifiedChange::Remove(path) => {
+            emit_watcher_change(app, &path, "structure", None);
+            // The cached snapshot no longer matches the file: invalidate it.
+            app.state::<WatcherState>()
+                .block_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(path);
+            tracing::info!(category = "watcher", "removed: {}", path.display());
+            spawn_removal(app, path.clone());
+        }
+        ClassifiedChange::Rename { from, to } => {
+            // The `to` path is the live one, so the structure event names it;
+            // the tree mirrors on-disk structure. Both cache entries are
+            // invalidated: the old path's snapshot is gone and the new path
+            // starts from a fresh baseline.
+            emit_watcher_change(app, &to, "structure", None);
+            let state = app.state::<WatcherState>();
+            let mut cache = state.block_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.remove(from);
+            cache.remove(to);
+            drop(cache);
+            tracing::info!(
+                category = "watcher",
+                "renamed: {} -> {}",
+                from.display(),
+                to.display()
+            );
+            spawn_relink(app, from.clone(), to.clone());
         }
     }
 }
@@ -405,11 +480,17 @@ fn emit_block_diffs(app: &tauri::AppHandle, path: &Path) {
         match diff.kind {
             DiffKind::Added => {
                 let excerpt = diff.new_excerpt.unwrap_or_default();
-                tracing::debug!(category = "watcher", "block added in {range}: \"{excerpt}\"");
+                tracing::debug!(
+                    category = "watcher",
+                    "block added in {range}: \"{excerpt}\""
+                );
             }
             DiffKind::Removed => {
                 let excerpt = diff.old_excerpt.unwrap_or_default();
-                tracing::debug!(category = "watcher", "block removed from {range}: \"{excerpt}\"");
+                tracing::debug!(
+                    category = "watcher",
+                    "block removed from {range}: \"{excerpt}\""
+                );
             }
             DiffKind::Changed => {
                 let old_excerpt = diff.old_excerpt.unwrap_or_default();
@@ -423,12 +504,13 @@ fn emit_block_diffs(app: &tauri::AppHandle, path: &Path) {
     }
 }
 
-fn emit_watcher_change(app: &tauri::AppHandle, path: &Path, kind: &str) {
+fn emit_watcher_change(app: &tauri::AppHandle, path: &Path, kind: &str, hash: Option<String>) {
     let _ = app.emit(
         "watcher://change",
         WatcherEvent {
             path: path.to_string_lossy().to_string(),
             kind: kind.to_string(),
+            hash,
         },
     );
 }
@@ -512,11 +594,7 @@ fn process_path_locked(store: &StoreState, path: &Path) {
             return;
         }
         Err(e) => {
-            tracing::warn!(
-                category = "pipeline",
-                "cannot read {}: {e}",
-                path.display()
-            );
+            tracing::warn!(category = "pipeline", "cannot read {}: {e}", path.display());
             return;
         }
     };

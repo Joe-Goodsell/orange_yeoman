@@ -162,6 +162,17 @@
     if (!kind) return;
     const filePath = project.openFilePath;
     if (!filePath) return;
+    // Disk state is the pipeline's source of truth: submit_block hashes the
+    // on-disk file and inline staleness re-parses it, so the editor persists
+    // its buffer before dispatching. Dispatching against stale disk state
+    // produces wrong hashes and immediately-stale results. saveOpenFile already
+    // records failures in project.error.
+    if (project.dirty) {
+      const content = currentDocText();
+      const ok = await project.saveOpenFile(content);
+      if (!ok) return;
+      if (project.openFilePath === filePath) persistedDoc = content;
+    }
     try {
       const taskId = await submitBlock(filePath, paragraph.text);
       if (taskId) {
@@ -194,6 +205,59 @@
     }
   }
 
+  // --- Save-to-disk ---
+  //
+  // The editor flushes its buffer to disk on Mod-s and on a debounced autosave,
+  // because the Rust pipeline reads DISK state as its source of truth (submit
+  // block hashes the on-disk file and inline staleness re-parses it). Saves are
+  // fire-and-forget: failures land in project.error without blocking input.
+
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Read the CURRENT view document text at call time, so a save always flushes
+  // whatever the buffer holds now, not a snapshot captured earlier.
+  function currentDocText(): string {
+    return view ? view.state.doc.toString() : "";
+  }
+
+  function clearAutosave() {
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+    }
+  }
+
+  // Debounced autosave: after the user pauses (~700 ms), flush the buffer if it
+  // is still dirty and a file is open. Never blocks input.
+  function scheduleAutosave() {
+    clearAutosave();
+    autosaveTimer = setTimeout(() => {
+      autosaveTimer = null;
+      if (project.dirty && project.openFilePath) {
+        saveOpenAndTrack(currentDocText());
+      }
+    }, 700);
+  }
+
+  // Fire a save of the open buffer and, when it lands while the same file is
+  // still open, record the saved content in `persistedDoc` so the file-change
+  // flush can tell the saved snapshot apart from newer local edits.
+  function saveOpenAndTrack(content: string): void {
+    const path = project.openFilePath;
+    void project.saveOpenFile(content).then((ok) => {
+      if (ok && project.openFilePath === path) persistedDoc = content;
+    });
+  }
+
+  // Mod-s handler: saves the open file instead of opening the browser's save
+  // dialog. Skips when there is nothing to save; returns true so CodeMirror
+  // treats the key as handled and never triggers a default action.
+  function saveNow(): boolean {
+    if (!project.openFilePath || !project.dirty) return true;
+    saveOpenAndTrack(currentDocText());
+    return true;
+  }
+
   onMount(() => {
     view = new EditorView({
       state: EditorState.create({
@@ -207,8 +271,14 @@
           slashCommandAutocomplete(),
           // Enter dispatches a complete bounded slash command as a side
           // effect; the highest precedence ensures it runs before both the
-          // completion keymap and the default newline insertion.
-          Prec.highest(keymap.of([{ key: "Enter", run: onEnterDispatch }])),
+          // completion keymap and the default newline insertion. Mod-s flushes
+          // the buffer to disk; preventDefault stops the browser save dialog.
+          Prec.highest(
+            keymap.of([
+              { key: "Enter", run: onEnterDispatch },
+              { key: "Mod-s", run: saveNow, preventDefault: true },
+            ])
+          ),
           EditorView.updateListener.of((u) => {
             const isRemote = u.transactions.some((tr) =>
               tr.annotation(Transaction.remote)
@@ -226,6 +296,11 @@
                 ) => number,
                 project.openFilePath
               );
+              // The buffer diverged from disk: schedule a debounced autosave.
+              // Non-blocking; the save itself is fire-and-forget.
+              if (project.dirty && project.openFilePath) {
+                scheduleAutosave();
+              }
             }
             // Snapshot the selection so the agent pane can link cards whose
             // source range overlaps the current selection. A collapsed
@@ -289,13 +364,32 @@
   // so switching files never blocks a later re-reveal of the same item.
   let lastFocusedId: string | null = null;
 
-  // Replace the document when the open file changes (preserved watcher path).
+  // Replace the document when the open file changes (preserved watcher path),
+  // and sync it to external content changes. The editor's own saves must never
+  // revert local edits: when the content changed because our own save landed
+  // while the user kept typing, the local buffer is newer than the saved
+  // snapshot, so keep the buffer and schedule another save instead.
   let prevOpenFilePath: string | null = project.openFilePath;
+  // Last document content known to be on disk for the open file. Set after an
+  // external replace (the loaded content) and after every successful save. The
+  // file-change branch compares the buffer against it to detect unsaved edits
+  // that must be flushed to disk before switching away.
+  let persistedDoc: string | null = null;
   $effect(() => {
     const file = project.openFilePath;
     const content = project.openFileContent;
     if (file !== prevOpenFilePath) {
+      // Flush unsaved edits of the previous file before switching away. Fire
+      // and forget: the switch must not block on the write.
+      const oldFile = prevOpenFilePath;
+      const oldDoc = view ? view.state.doc.toString() : null;
+      if (oldFile !== null && oldDoc !== null && oldDoc !== persistedDoc) {
+        void project.saveFileContent(oldFile, oldDoc);
+      }
       prevOpenFilePath = file;
+      // A pending autosave belongs to the previous file's buffer; it must not
+      // fire against the newly opened document.
+      clearAutosave();
       // A freshly opened file has no meaningful selection to link against,
       // and the previous file's focus state must not block a re-reveal of
       // the same feedback id.
@@ -304,8 +398,14 @@
       // Slash-command dispatch state is per-file: a paragraph hash in the new
       // file must never be blocked by a dispatch that happened in the old one.
       dispatchedKeys.clear();
+      // The new file's on-disk content is not known yet; the external sync
+      // below (or the next save) re-establishes it.
+      persistedDoc = null;
     }
-    if (view && view.state.doc.toString() !== content) {
+    if (!view) return;
+    const doc = view.state.doc.toString();
+    if (doc === content) return;
+    if (project.contentOrigin === "external") {
       view.dispatch({
         annotations: Transaction.remote.of(true),
         changes: {
@@ -314,6 +414,14 @@
           insert: content,
         },
       });
+      persistedDoc = content;
+    } else {
+      // The content change came from our own save landing while the user kept
+      // typing. The local buffer is newer than the saved snapshot; a save must
+      // never revert local edits. Re-mark the buffer dirty and reschedule the
+      // debounced autosave so the newer keystrokes persist.
+      project.dirty = true;
+      scheduleAutosave();
     }
   });
 
@@ -363,6 +471,7 @@
   });
 
   onDestroy(() => {
+    clearAutosave();
     if (view) {
       view.dom.removeEventListener("click", onDecorationClick);
       view.destroy();
@@ -379,6 +488,12 @@
     {/if}
     {#if project.loading}
       <span class="loading">loading...</span>
+    {/if}
+    {#if project.saving}
+      <span class="saving" title="Saving to disk">saving...</span>
+    {/if}
+    {#if project.error}
+      <span class="error" title={project.error}>error</span>
     {/if}
   </div>
   <div class="editor-host" bind:this={host}></div>
@@ -421,6 +536,19 @@
   .loading {
     font-size: 11px;
     opacity: 0.4;
+  }
+
+  .saving {
+    font-size: 11px;
+    opacity: 0.4;
+  }
+
+  .error {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #c88;
+    opacity: 0.8;
   }
 
   .editor-host {

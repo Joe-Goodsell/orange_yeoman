@@ -8,6 +8,9 @@ export interface ChangeEvent {
   path: string;
   kind: "structure" | "content";
   ts: number;
+  // Content hash of the new on-disk bytes (pipeline::stable_hash). Present
+  // only on content events, so the store can recognize the editor's own writes.
+  hash?: string;
 }
 
 // Safe view of the merged config as produced by the Rust core. Contains no API

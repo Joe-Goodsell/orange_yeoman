@@ -1,6 +1,7 @@
 import {
   loadProjectConfig as loadProjectConfigCmd,
   readTextFile,
+  writeTextFile,
   onTaskUpdated,
   onResultReady,
   getTaskStatus,
@@ -38,7 +39,15 @@ class ProjectStore {
   openFilePath = $state<string | null>(null);
   openFileContent = $state<string>("");
   dirty = $state<boolean>(false);
+  // Whether openFileContent came from the editor's own save ("editor") or from
+  // a load/external source ("external"). The editor's doc-sync effect uses
+  // this to decide whether a content change is an external load (replace the
+  // document) or the editor's own save (local buffer wins — a save must never
+  // revert local edits made while the write IPC was in flight).
+  contentOrigin = $state<"editor" | "external">("external");
   loading = $state<boolean>(false);
+  // True while a save IPC is in flight; the editor header shows it.
+  saving = $state<boolean>(false);
   error = $state<string | null>(null);
   // Separate config error state. Kept apart from `error` so a config reload
   // never erases unrelated file/watcher errors.
@@ -84,6 +93,14 @@ class ProjectStore {
 
   private gen = 0;
 
+  // File path -> content hash of the last successful save made by this editor.
+  // Watcher content events carry the same hash, so pushChange can recognize
+  // the editor's own writes and skip the stale pass for them.
+  private selfWrites: Record<string, string> = {};
+  // Serialize saves: each save queues behind the previous one so concurrent
+  // saves to the same file cannot interleave writes; last content wins.
+  private saveChain: Promise<unknown> = Promise.resolve();
+
   // ---- Task event subscriptions ----
   private taskUnlisteners: Array<() => void> = [];
   private taskSubsAlive = false;
@@ -123,6 +140,10 @@ class ProjectStore {
     this.watching = true;
     this.changeFeed = [];
     this.structureVersion = 0;
+    // No file is open under the new root; prune saved-write records and reset
+    // the content origin so the next open file is treated as an external load.
+    this.selfWrites = {};
+    this.contentOrigin = "external";
     this.resetFeedback();
     try {
       localStorage.setItem(STORAGE_KEY, path);
@@ -144,6 +165,10 @@ class ProjectStore {
     this.watching = false;
     this.changeFeed = [];
     this.structureVersion = 0;
+    // No file is open after clearing; prune saved-write records and reset the
+    // content origin so the next open file is treated as an external load.
+    this.selfWrites = {};
+    this.contentOrigin = "external";
     this.configStatus = null;
     this.configError = null;
     this.resetFeedback();
@@ -159,11 +184,18 @@ class ProjectStore {
   pushChange(e: ChangeEvent) {
     this.changeFeed = [e, ...this.changeFeed].slice(0, 100);
     if (e.kind === "structure") this.structureVersion++;
+    // A content event whose hash matches this editor's last save for that file
+    // is a self-write: the editor already maps feedback ranges locally on every
+    // keystroke, so the save must not mark every item stale.
+    const isSelfWrite =
+      e.kind === "content" &&
+      e.hash !== undefined &&
+      this.selfWrites[e.path] === e.hash;
     // Feedback ranges are anchored to the snapshot of their file. When that
     // file changes on disk (external edit), the item can no longer be
     // presented as authoritative; mark it stale so the pane says so and the
     // user can re-run it. `error` items already communicate a failure.
-    if (e.kind === "content") {
+    if (e.kind === "content" && !isSelfWrite) {
       this.feedback = this.feedback.map((f) =>
         f.range.file === e.path && f.status !== "stale" && f.status !== "error"
           ? { ...f, status: "stale", updatedAt: Date.now() }
@@ -518,6 +550,9 @@ class ProjectStore {
       const content = await readTextFile(path);
       if (startGen !== this.gen) return;
       this.openFilePath = path;
+      // A freshly read file is external content: the editor's doc-sync effect
+      // must replace the document with it, never keep the previous buffer.
+      this.contentOrigin = "external";
       this.openFileContent = content;
       this.dirty = false;
     } catch (e) {
@@ -526,6 +561,57 @@ class ProjectStore {
     } finally {
       if (startGen === this.gen) this.loading = false;
     }
+  }
+
+  // Persist an arbitrary file's content to disk. Serialized through the same
+  // promise chain as saveOpenFile so writes to the same file never interleave;
+  // the last caller's content wins. Records the write in selfWrites so the
+  // watcher recognizes it as our own. It does NOT touch openFileContent, dirty,
+  // or contentOrigin: it also runs for a file that is no longer open (the
+  // editor flushes the previous file on switch), and those fields belong to
+  // saveOpenFile's gen/path-guarded success path. Returns true on success;
+  // failures land in `error`.
+  async saveFileContent(path: string, content: string): Promise<boolean> {
+    const run = this.saveChain.then(async () => {
+      this.saving = true;
+      try {
+        const hash = await writeTextFile(path, content);
+        this.selfWrites[path] = hash;
+        return true;
+      } catch (e) {
+        this.error = String(e);
+        return false;
+      } finally {
+        this.saving = false;
+      }
+    });
+    // Keep the chain alive: a queued save runs after this one settles, and a
+    // rejection never leaks past the chain (all errors are captured above).
+    this.saveChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  // Persist the current editor buffer to disk. Returns true on success.
+  // Delegates the write to saveFileContent (shared serializer). The success
+  // path applies the result to the open-file state only when the generation is
+  // unchanged and the open file still matches the saved path, so a file switch
+  // or project change mid-save must not clobber the new file's state. The
+  // "editor" content origin marks this content change as our own save so the
+  // doc-sync effect keeps the local buffer instead of replacing it.
+  async saveOpenFile(content: string): Promise<boolean> {
+    const path = this.openFilePath;
+    if (!path) return false;
+    const startGen = this.gen;
+    const ok = await this.saveFileContent(path, content);
+    if (ok && startGen === this.gen && this.openFilePath === path) {
+      this.contentOrigin = "editor";
+      this.openFileContent = content;
+      this.dirty = false;
+    }
+    return ok;
   }
 }
 

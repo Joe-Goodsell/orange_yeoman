@@ -26,6 +26,13 @@ export async function readTextFile(path: string): Promise<string> {
   return invoke<string>("read_text_file", { path });
 }
 
+// Returns the stable content hash of the written bytes; the watcher stamps the
+// same hash on the resulting content event so the store can recognize
+// self-writes.
+export async function writeTextFile(path: string, contents: string): Promise<string> {
+  return invoke<string>("write_text_file", { path, contents });
+}
+
 export async function startWatcher(root: string): Promise<void> {
   return invoke<void>("start_watcher", { root });
 }
@@ -38,11 +45,14 @@ export async function stopWatcher(): Promise<void> {
 export interface WatcherEvent {
   path: string;
   kind: "structure" | "content";
+  // Content hash of the new on-disk content; present only on content events.
+  hash?: string;
 }
 
 export function onWatcherChange(cb: (e: ChangeEvent) => void): Promise<UnlistenFn> {
   return listen<WatcherEvent>("watcher://change", (event) => {
-    cb({ path: event.payload.path, kind: event.payload.kind, ts: Date.now() });
+    const { path, kind, hash } = event.payload;
+    cb({ path, kind, ts: Date.now(), ...(hash !== undefined ? { hash } : {}) });
   });
 }
 

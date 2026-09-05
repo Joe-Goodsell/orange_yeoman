@@ -12,7 +12,10 @@ fn create_event_is_structure() {
     let root = Path::new("/repo");
     let path = root.join("note.md");
     let event = event_at(EventKind::Create(CreateKind::File), &path);
-    assert_eq!(classify_event(root, &event), Some(ClassifiedChange::Create(path)));
+    assert_eq!(
+        classify_event(root, &event),
+        Some(ClassifiedChange::Create(path))
+    );
 }
 
 #[test]
@@ -20,7 +23,10 @@ fn remove_event_is_structure() {
     let root = Path::new("/repo");
     let path = root.join("note.md");
     let event = event_at(EventKind::Remove(RemoveKind::File), &path);
-    assert_eq!(classify_event(root, &event), Some(ClassifiedChange::Remove(path)));
+    assert_eq!(
+        classify_event(root, &event),
+        Some(ClassifiedChange::Remove(path))
+    );
 }
 
 // A single-path rename (macOS FSEvents shape) classifies as Structure with the
@@ -58,7 +64,10 @@ fn rename_from_event_is_remove() {
     let root = Path::new("/repo");
     let path = root.join("old.md");
     let event = event_at(EventKind::Modify(ModifyKind::Name(RenameMode::From)), &path);
-    assert_eq!(classify_event(root, &event), Some(ClassifiedChange::Remove(path)));
+    assert_eq!(
+        classify_event(root, &event),
+        Some(ClassifiedChange::Remove(path))
+    );
 }
 
 // The unpaired to side of a rename classifies as creation (new path present).
@@ -67,7 +76,10 @@ fn rename_to_event_is_create() {
     let root = Path::new("/repo");
     let path = root.join("new.md");
     let event = event_at(EventKind::Modify(ModifyKind::Name(RenameMode::To)), &path);
-    assert_eq!(classify_event(root, &event), Some(ClassifiedChange::Create(path)));
+    assert_eq!(
+        classify_event(root, &event),
+        Some(ClassifiedChange::Create(path))
+    );
 }
 
 // A rename that notify-debouncer-full could not interpret (RenameMode::Other)
@@ -76,7 +88,10 @@ fn rename_to_event_is_create() {
 fn rename_other_event_is_none() {
     let root = Path::new("/repo");
     let path = root.join("note.md");
-    let event = event_at(EventKind::Modify(ModifyKind::Name(RenameMode::Other)), &path);
+    let event = event_at(
+        EventKind::Modify(ModifyKind::Name(RenameMode::Other)),
+        &path,
+    );
     assert_eq!(classify_event(root, &event), None);
 }
 
@@ -135,6 +150,26 @@ fn dotfile_named_root_still_reports_children() {
         classify_event(root, &event),
         Some(ClassifiedChange::Content(path))
     );
+}
+
+// --- Content hash helper ---
+
+#[test]
+fn content_hash_of_existing_file_matches_stable_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "hello world").unwrap();
+    assert_eq!(
+        content_hash(&path),
+        Some(crate::pipeline::stable_hash("hello world"))
+    );
+}
+
+#[test]
+fn content_hash_of_missing_file_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.md");
+    assert_eq!(content_hash(&path), None);
 }
 
 // --- Block snapshot diffing ---
@@ -236,7 +271,10 @@ fn multiple_divergent_blocks_emit_separate_diffs() {
 
 #[test]
 fn excerpt_is_collapsed_trimmed_and_capped() {
-    assert_eq!(excerpt_of("  alpha\n  beta\t  gamma  ", 80), "alpha beta gamma");
+    assert_eq!(
+        excerpt_of("  alpha\n  beta\t  gamma  ", 80),
+        "alpha beta gamma"
+    );
     let long = "word ".repeat(40); // 200 chars, far over the 80-char cap
     assert_eq!(excerpt_of(&long, 80).chars().count(), 80);
 }

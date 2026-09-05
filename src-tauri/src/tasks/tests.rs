@@ -254,6 +254,29 @@ fn is_inline_result_stale_same_block_sibling_line_edited_returns_false() {
     )));
 }
 
+// Regression: the pipeline reads files FROM DISK, so the inline stale check
+// must see the typed command line once the editor persists the buffer. A temp
+// file whose content contains the command line keeps the result fresh; the
+// same file without the command line is stale.
+#[test]
+fn is_inline_result_stale_reads_command_line_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    let with_command = "The value is 450 celsius.\n/fact-check amperes are tricky.";
+    std::fs::write(&path, with_command).unwrap();
+    let line_hash = inline_line_hash(with_command);
+    let path_str = path.to_string_lossy().to_string();
+    assert!(!is_inline_result_stale(Some(&path_str), &line_hash, |p| {
+        std::fs::read_to_string(p).map_err(|_| ())
+    }));
+
+    let without_command = "The value is 450 celsius.";
+    std::fs::write(&path, without_command).unwrap();
+    assert!(is_inline_result_stale(Some(&path_str), &line_hash, |p| {
+        std::fs::read_to_string(p).map_err(|_| ())
+    }));
+}
+
 #[test]
 fn task_metadata_serializes_to_camel_case() {
     let metadata = TaskMetadata {
