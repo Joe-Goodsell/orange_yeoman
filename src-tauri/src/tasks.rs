@@ -329,6 +329,29 @@ fn scrub_error(msg: &str) -> String {
         .collect()
 }
 
+/// Collapse whitespace to single spaces and cap the length. Used for debug log
+/// summaries so an event message always stays on one line.
+fn collapse_and_cap(text: &str, cap: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(cap)
+        .collect()
+}
+
+/// The snake_case name of a task status, matching its serde serialization.
+/// Used in debug log messages so the console shows the same names as IPC.
+fn status_name(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Queued => "queued",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Stale => "stale",
+    }
+}
+
 /// Compute the source hash for a task: the whole-file content hash when a
 /// file path is available, otherwise the hash of the block text. The stale
 /// check in dispatch_task re-reads the file and hashes its content, so a
@@ -382,6 +405,7 @@ pub(crate) fn dispatch_task(
     async_runtime::spawn(async move {
         // Mark the task as running and notify the frontend.
         store.update(&spawned_task_id, TaskStatus::Running, false, None);
+        tracing::debug!(category = "task", "task {} -> running", spawned_task_id);
         let event = TaskEvent {
             task_id: spawned_task_id.clone(),
             status: TaskStatus::Running,
@@ -409,7 +433,9 @@ pub(crate) fn dispatch_task(
         // observed by the supervisor below instead of silently hanging the
         // outer task and leaving the frontend stuck on "running". The inner
         // task returns the outcome as a Result; the outer task maps it to
-        // frontend events and always clears the dedup identity.
+        // frontend events and always clears the dedup identity. Capture the
+        // start instant so the return events can report the call duration.
+        let started = std::time::Instant::now();
         let inner = async_runtime::spawn(async move {
             provider.complete(request.clone()).await.map(|response| {
                 // Inline command tasks anchor to a single command line, so
@@ -443,7 +469,20 @@ pub(crate) fn dispatch_task(
 
         match inner.await {
             Ok(Ok((status, stale_flag, result_value))) => {
+                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+                let stale_note = if stale_flag { " (stale)" } else { "" };
+                let summary = collapse_and_cap(&result_value.to_string(), 120);
+                tracing::info!(
+                    category = "llm_call",
+                    "{kind_str} returned in {dur}{stale_note}: {summary}"
+                );
                 store.update(&spawned_task_id, status, stale_flag, None);
+                tracing::debug!(
+                    category = "task",
+                    "task {} -> {}",
+                    spawned_task_id,
+                    status_name(status)
+                );
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status,
@@ -455,6 +494,11 @@ pub(crate) fn dispatch_task(
                 let _ = app.emit("agent://result-ready", result);
             }
             Ok(Err(e)) => {
+                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+                // The LlmError Display impl already scrubs key material, so
+                // the raw error is safe for the debug console at error level
+                // (always visible even with the debug flag off).
+                tracing::error!(category = "llm_call", "{kind_str} failed in {dur}: {e}");
                 let sanitized = scrub_error(&e.to_string());
                 store.update(
                     &spawned_task_id,
@@ -462,6 +506,7 @@ pub(crate) fn dispatch_task(
                     false,
                     Some(sanitized.clone()),
                 );
+                tracing::debug!(category = "task", "task {} -> failed", spawned_task_id);
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status: TaskStatus::Failed,
@@ -473,9 +518,10 @@ pub(crate) fn dispatch_task(
                 let _ = app.emit("agent://result-ready", result);
             }
             Err(join_error) => {
-                // The inner task panicked. Never scrub the panic payload: it
-                // may embed sensitive data. A fixed safe message crosses to
-                // the frontend instead, and the panic details go to the log.
+                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+                // The inner task panicked. Never scrub the panic payload: the
+                // fixed safe message crosses to the frontend result payload;
+                // the panic details go to the error-level debug event and stderr.
                 let sanitized = scrub_error("internal task error");
                 store.update(
                     &spawned_task_id,
@@ -483,6 +529,7 @@ pub(crate) fn dispatch_task(
                     false,
                     Some(sanitized.clone()),
                 );
+                tracing::debug!(category = "task", "task {} -> failed", spawned_task_id);
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status: TaskStatus::Failed,
@@ -494,7 +541,7 @@ pub(crate) fn dispatch_task(
                 let _ = app.emit("agent://result-ready", result);
                 tracing::error!(
                     category = "task",
-                    "task {} panicked: {:?}",
+                    "task {} panicked after {dur}: {:?}",
                     spawned_task_id,
                     join_error
                 );
@@ -617,9 +664,10 @@ pub(crate) async fn submit_block(
             {
                 Ok(task_id) => Ok(Some(task_id)),
                 Err(e) if e.starts_with("duplicate") => {
-                    // Duplicate tasks are silently dropped because the
-                    // original task is still in progress and will emit its own
-                    // result.
+                    // Defensive: the Inline path cannot currently produce a
+                    // duplicate error (dedup applies to Automatic triggers
+                    // only), so the original task's own result is all the
+                    // frontend needs.
                     Ok(None)
                 }
                 Err(e) => Err(e),
@@ -726,6 +774,7 @@ pub(crate) async fn submit_block(
         Err(e) if e.starts_with("duplicate") => {
             // Duplicate automatic tasks are silently dropped because the
             // original task is still in progress and will emit its own result.
+            tracing::debug!(category = "task", "duplicate task suppressed");
             return Ok(None);
         }
         Err(e) => return Err(e),

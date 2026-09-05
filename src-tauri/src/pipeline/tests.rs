@@ -112,6 +112,15 @@ fn stable_hash_is_deterministic_and_distinct() {
     assert_ne!(stable_hash("abc"), stable_hash("abd"));
 }
 
+// Published FNV-1a 64-bit vectors: empty string, single byte "a", and
+// "foobar". These pin the implementation across Rust releases.
+#[test]
+fn stable_hash_known_fnv1a_vectors() {
+    assert_eq!(stable_hash(""), "cbf29ce484222325");
+    assert_eq!(stable_hash("a"), "af63dc4c8601ec8c");
+    assert_eq!(stable_hash("foobar"), "85944171f73967e8");
+}
+
 // Every block's hash must equal the stable hash of its own text.
 #[test]
 fn block_hash_matches_stable_hash() {

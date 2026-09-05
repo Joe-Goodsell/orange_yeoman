@@ -2,7 +2,9 @@
   // Bottom console showing debug events emitted by the Rust core. Error and
   // warning events always arrive; info and below arrive when the `debug`
   // config flag is on. Newest events appear at the bottom. A level filter row
-  // controls which levels render.
+  // controls which levels render. When the 500-event buffer is full the
+  // console says so, and the list only scrolls when the user is already at
+  // the bottom: reading history during an event burst is never interrupted.
   import { tick } from "svelte";
   import { debug } from "$lib/stores/debug.svelte";
 
@@ -17,15 +19,24 @@
 
   let container = $state<HTMLDivElement | undefined>(undefined);
 
-  // Pin the console to the newest event: when the event count changes, wait
-  // for the DOM update and scroll the list to the bottom.
+  // Stick-to-bottom scrolling: pinned stays true only while the list is at
+  // (or within 24px of) the bottom. New events scroll the list down only
+  // when pinned, so an event burst cannot yank the view away from history.
+  let pinned = $state(true);
+
   $effect(() => {
     const el = container;
-    if (!el || debug.events.length === 0) return;
+    if (!el || debug.events.length === 0 || !pinned) return;
     void tick().then(() => {
       el.scrollTop = el.scrollHeight;
     });
   });
+
+  function onScroll() {
+    const el = container;
+    if (!el) return;
+    pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }
 
   function toggleLevel(level: Level) {
     const next = new Set(activeLevels);
@@ -48,7 +59,14 @@
 <div class="debug-pane">
   <header class="head">
     <h2 class="title">Debug console</h2>
-    <button class="clear-btn" type="button" onclick={() => debug.clear()}>
+    <button
+      class="clear-btn"
+      type="button"
+      onclick={() => {
+        debug.clear();
+        pinned = true;
+      }}
+    >
       Clear
     </button>
   </header>
@@ -63,7 +81,13 @@
       </button>
     {/each}
   </div>
-  <div class="list" bind:this={container}>
+  {#if debug.dropped > 0}
+    <p class="drop-note">
+      Buffer full: {debug.dropped} older {debug.dropped === 1 ? "event" : "events"}
+      dropped. The console keeps the latest 500 events.
+    </p>
+  {/if}
+  <div class="list" bind:this={container} onscroll={onScroll}>
     {#if visibleEvents.length === 0}
       <p class="empty">
         No debug events. Error and warning events always appear; info and below
@@ -132,6 +156,16 @@
     gap: 4px;
     padding: 4px 8px;
     border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  }
+
+  .drop-note {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 3px 10px;
+    font-size: 10px;
+    border-bottom: 1px solid rgba(210, 140, 60, 0.35);
+    background: rgba(210, 140, 60, 0.12);
+    color: rgba(240, 190, 120, 0.95);
   }
 
   .lvl-btn {
@@ -227,6 +261,16 @@
   .badge.watcher {
     background: rgba(200, 160, 90, 0.22);
     color: rgba(220, 190, 130, 0.95);
+  }
+
+  .badge.task {
+    background: rgba(150, 120, 190, 0.22);
+    color: rgba(200, 180, 230, 0.95);
+  }
+
+  .badge.config {
+    background: rgba(80, 160, 180, 0.22);
+    color: rgba(140, 200, 220, 0.95);
   }
 
   .lvl {
