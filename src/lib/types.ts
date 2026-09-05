@@ -18,6 +18,10 @@ export interface ConfigStatus {
   project_path: string | null;
   small_model: string;
   large_model: string;
+  // Named provider of each model, present only when the config used the
+  // structured { provider, id } form; null for the legacy plain-string form.
+  small_provider: string | null;
+  large_provider: string | null;
   configured_providers: string[];
   error: string | null;
   debug: boolean;
@@ -163,6 +167,7 @@ export interface TaskEvent {
 export interface TaskResult {
   taskId: string;
   status: TaskStatus;
+  kind: LlmRequestKind;
   stale: boolean;
   result: unknown | null;
   error: string | null;

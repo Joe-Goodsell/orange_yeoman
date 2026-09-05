@@ -73,6 +73,7 @@ pub(crate) struct TaskEvent {
 pub(crate) struct TaskResult {
     pub(crate) task_id: String,
     pub(crate) status: TaskStatus,
+    pub(crate) kind: crate::llm::LlmRequestKind,
     pub(crate) stale: bool,
     pub(crate) result: Option<serde_json::Value>,
     pub(crate) error: Option<String>,
@@ -367,6 +368,21 @@ fn source_hash_of(file_path: &Option<String>, block_text: &str) -> Result<String
     }
 }
 
+/// Resolve the model id shown in the llm_call debug event. A provider that
+/// serves a fixed model (the mock) overrides the request's model hint; the
+/// real provider serves the configured model; an unset model shows as
+/// "<unset>".
+fn llm_call_model_label(
+    provider: &dyn crate::llm::LlmProvider,
+    request: &crate::llm::LlmRequest,
+) -> String {
+    provider
+        .serving_model()
+        .map(str::to_string)
+        .or_else(|| request.model.clone().filter(|m| !m.is_empty()))
+        .unwrap_or_else(|| "<unset>".to_string())
+}
+
 /// Dispatch an LLM task asynchronously. Returns the task_id immediately.
 /// The provider call runs in a spawned async task. Events are emitted on completion.
 ///
@@ -399,25 +415,19 @@ pub(crate) fn dispatch_task(
         };
         let _ = app.emit("agent://task-updated", event);
 
-        // Debug instrumentation: report the outgoing LLM call (kind, resolved
-        // model, and a prompt summary) right before it is dispatched to the
-        // provider. The category field keeps the existing "llm_call" UI
-        // category.
+        // Debug instrumentation: report the outgoing LLM call (kind and
+        // resolved model) right before it is dispatched to the provider.
+        // The category field keeps the existing "llm_call" UI category. The
+        // provider's serving_model (the mock identity) overrides the request's
+        // model hint so mock calls are identifiable in the debug console.
         let kind_str = match request.kind {
             crate::llm::LlmRequestKind::Extraction => "extraction",
             crate::llm::LlmRequestKind::FactCheck => "fact_check",
             crate::llm::LlmRequestKind::Research => "research",
         };
-        let model = request
-            .model
-            .as_deref()
-            .filter(|m| !m.is_empty())
-            .unwrap_or("<unset>");
-        let prompt_summary = collapse_and_cap(&request.user_prompt, 160);
-        tracing::info!(
-            category = "llm_call",
-            "{kind_str} -> {model}; prompt: \"{prompt_summary}\""
-        );
+        let request_kind = request.kind;
+        let model = llm_call_model_label(provider.as_ref(), &request);
+        tracing::info!(category = "llm_call", "{kind_str} -> {model}");
 
         // The provider call runs in an INNER task so that a panic inside it is
         // observed by the supervisor below instead of silently hanging the
@@ -476,6 +486,7 @@ pub(crate) fn dispatch_task(
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status,
+                    kind: request_kind,
                     stale: stale_flag,
                     result: Some(result_value),
                     error: None,
@@ -499,6 +510,7 @@ pub(crate) fn dispatch_task(
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status: TaskStatus::Failed,
+                    kind: request_kind,
                     stale: false,
                     result: None,
                     error: Some(sanitized),
@@ -521,6 +533,7 @@ pub(crate) fn dispatch_task(
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status: TaskStatus::Failed,
+                    kind: request_kind,
                     stale: false,
                     result: None,
                     error: Some(sanitized),
@@ -549,8 +562,9 @@ pub(crate) fn dispatch_task(
 
 /// Process a block of markdown: parse, classify, route, and dispatch. The
 /// routing decision determines the action: an inline /fact-check command
-/// dispatches a fact-check task with the Inline trigger; a needs-extraction
-/// block dispatches an extraction task. Inline /research and /ignore are
+/// dispatches a fact-check task with the Inline trigger, an inline /research
+/// command dispatches a research task with the Inline trigger, and a
+/// needs-extraction block dispatches an extraction task. Inline /ignore is
 /// recognized but not dispatched yet (roadmap), and Skip decisions do nothing.
 /// Callers include both the slash-command path and future automatic paths.
 /// Returns the new task id, or None when no task was dispatched.
@@ -579,8 +593,9 @@ pub(crate) async fn submit_block(
 
     // Parse a slash command from the block and let route_block honor it. An
     // inline /fact-check command dispatches a fact-check task with the Inline
-    // trigger. Inline /research and /ignore are recognized but not dispatched
-    // yet (roadmap). Explicit commands go through the dedicated
+    // trigger, and an inline /research command dispatches a research task with
+    // the Inline trigger. Inline /ignore is recognized but not dispatched yet
+    // (roadmap). Explicit commands go through the dedicated
     // submit_fact_check / submit_research commands.
     let command = crate::pipeline::parse_slash_command_in_block(&block);
     // Debug instrumentation: report a recognized slash command so the frontend
@@ -659,10 +674,59 @@ pub(crate) async fn submit_block(
             };
         }
         crate::pipeline::RoutingDecision::Research => {
-            // Roadmap: the inline /research workload is not dispatched from
-            // the auto path yet. The command is recognized so the routing
-            // decision is authoritative; dispatch arrives in a later phase.
-            return Ok(None);
+            // Inline /research: dispatch a research task. route_block returns
+            // Research only when a parsed command is present, so the command
+            // is guaranteed to exist here. The goal is the parsed focus text;
+            // the selection is empty (no editor selection on the inline path);
+            // the block text is the document.
+            let parsed = command
+                .as_ref()
+                .expect("Research decision implies a parsed command");
+            let envelope =
+                crate::pipeline::build_inline_envelope(&block, parsed, file_path.as_deref());
+            let source_hash = source_hash_of(&file_path, &block_text)?;
+            let large_model = config_state.large_model();
+            let request = crate::pipeline::build_research_request(
+                &parsed.focus_text,
+                "",
+                &block.text,
+                &large_model,
+            );
+            let task_id = crate::pipeline::inline_task_id(&envelope);
+            let metadata = TaskMetadata {
+                task_id,
+                file_path,
+                block_hash: block.block_hash.clone(),
+                source_hash,
+                focus_start: Some(envelope.focus_ref.start),
+                focus_end: Some(envelope.focus_ref.end),
+                line_text_hash: Some(crate::pipeline::stable_hash(
+                    &block.text[parsed.line_start..parsed.line_end],
+                )),
+                trigger: crate::pipeline::Trigger::Inline,
+                status: TaskStatus::Queued,
+                stale: false,
+                error: None,
+            };
+            let identity = dedup_identity(
+                &metadata.block_hash,
+                crate::pipeline::Trigger::Inline,
+                crate::llm::LlmRequestKind::Research,
+            );
+
+            let store_arc = store.inner().clone();
+            let provider_arc = llm_state.provider();
+            return match dispatch_task(app, store_arc, provider_arc, request, metadata, identity)
+            {
+                Ok(task_id) => Ok(Some(task_id)),
+                Err(e) if e.starts_with("duplicate") => {
+                    // Duplicate tasks are silently dropped because the
+                    // original task is still in progress and will emit its own
+                    // result.
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            };
         }
         crate::pipeline::RoutingDecision::Ignore => {
             // Roadmap: ignore-rule persistence is not implemented yet. The

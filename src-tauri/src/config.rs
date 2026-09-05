@@ -31,25 +31,43 @@ struct ConfigFile {
     mock_llm: Option<bool>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-struct ModelsConfig {
-    // Field-level defaults are empty strings. An absent field is a "not
-    // supplied" sentinel that apply_file skips, so earlier merge layers
-    // survive a partial models object. Models are never defaulted: an unset
-    // model stays empty until a config file supplies it.
-    #[serde(default)]
-    small: String,
-    #[serde(default)]
-    large: String,
+// One configured model. Accepts the structured form { provider, id } and,
+// for backward compatibility, the legacy plain-string form (model id only,
+// provider unresolved).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum ModelSpec {
+    Id(String),
+    Provider { provider: String, id: String },
 }
 
-impl Default for ModelsConfig {
-    fn default() -> Self {
-        ModelsConfig {
-            small: String::new(),
-            large: String::new(),
+impl ModelSpec {
+    /// The model id, whichever form is used.
+    fn id(&self) -> &str {
+        match self {
+            ModelSpec::Id(s) => s,
+            ModelSpec::Provider { id, .. } => id,
         }
     }
+
+    /// The named provider, when the structured form is used.
+    fn provider(&self) -> Option<&str> {
+        match self {
+            ModelSpec::Id(_) => None,
+            ModelSpec::Provider { provider, .. } => Some(provider),
+        }
+    }
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct ModelsConfig {
+    // Absent = "not supplied": apply_file skips None so earlier merge
+    // layers survive a partial models object. Models are never defaulted: an
+    // unset model stays None until a config file supplies it.
+    #[serde(default)]
+    small: Option<ModelSpec>,
+    #[serde(default)]
+    large: Option<ModelSpec>,
 }
 
 // Safe, frontend-visible view of the merged config. Contains no API key values.
@@ -60,6 +78,10 @@ pub(crate) struct ConfigStatus {
     project_path: Option<String>,
     small_model: String,
     large_model: String,
+    // None when the model came from the legacy plain-string form (provider
+    // unresolved) or is not configured at all.
+    small_provider: Option<String>,
+    large_provider: Option<String>,
     configured_providers: Vec<String>,
     error: Option<String>,
     debug: bool,
@@ -69,8 +91,8 @@ pub(crate) struct ConfigStatus {
 // In-memory merged config held in Tauri state. API keys never leave this struct.
 struct MergedConfig {
     api_keys: HashMap<String, String>,
-    small_model: String,
-    large_model: String,
+    small: Option<ModelSpec>,
+    large: Option<ModelSpec>,
     global_loaded: bool,
     project_loaded: bool,
     project_path: Option<String>,
@@ -83,8 +105,8 @@ impl Default for MergedConfig {
     fn default() -> Self {
         MergedConfig {
             api_keys: HashMap::new(),
-            small_model: String::new(),
-            large_model: String::new(),
+            small: None,
+            large: None,
             global_loaded: false,
             project_loaded: false,
             project_path: None,
@@ -108,8 +130,18 @@ impl From<&MergedConfig> for ConfigStatus {
             global_loaded: m.global_loaded,
             project_loaded: m.project_loaded,
             project_path: m.project_path.clone(),
-            small_model: m.small_model.clone(),
-            large_model: m.large_model.clone(),
+            small_model: m
+                .small
+                .as_ref()
+                .map(|spec| spec.id().to_string())
+                .unwrap_or_default(),
+            large_model: m
+                .large
+                .as_ref()
+                .map(|spec| spec.id().to_string())
+                .unwrap_or_default(),
+            small_provider: m.small.as_ref().and_then(|s| s.provider().map(str::to_string)),
+            large_provider: m.large.as_ref().and_then(|s| s.provider().map(str::to_string)),
             configured_providers,
             error: m.error.clone(),
             debug: m.debug,
@@ -123,22 +155,56 @@ pub(crate) struct ConfigState {
 }
 
 impl ConfigState {
-    /// Current small model id from the merged config.
+    /// Current small model id from the merged config. The resolved id is
+    /// returned for both the structured and the legacy form.
     /// Falls back to an empty string when the lock is poisoned.
     pub(crate) fn small_model(&self) -> String {
         self.inner
             .lock()
-            .map(|guard| guard.small_model.clone())
+            .map(|guard| {
+                guard
+                    .small
+                    .as_ref()
+                    .map(|spec| spec.id().to_string())
+                    .unwrap_or_default()
+            })
             .unwrap_or_else(|_| String::new())
     }
 
-    /// Current large model id from the merged config.
+    /// Current large model id from the merged config. The resolved id is
+    /// returned for both the structured and the legacy form.
     /// Falls back to an empty string when the lock is poisoned.
     pub(crate) fn large_model(&self) -> String {
         self.inner
             .lock()
-            .map(|guard| guard.large_model.clone())
+            .map(|guard| {
+                guard
+                    .large
+                    .as_ref()
+                    .map(|spec| spec.id().to_string())
+                    .unwrap_or_default()
+            })
             .unwrap_or_else(|_| String::new())
+    }
+
+    /// Provider named by the current small model, when the structured form is
+    /// used. None for the legacy plain-string form and for an unset slot.
+    /// Falls back to None when the lock is poisoned.
+    pub(crate) fn small_provider(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.small.as_ref().and_then(|s| s.provider().map(str::to_string)))
+    }
+
+    /// Provider named by the current large model, when the structured form is
+    /// used. None for the legacy plain-string form and for an unset slot.
+    /// Falls back to None when the lock is poisoned.
+    pub(crate) fn large_provider(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.large.as_ref().and_then(|s| s.provider().map(str::to_string)))
     }
 
     /// Current debug flag from the merged config. Debug events are emitted
@@ -207,17 +273,22 @@ fn read_config_file(path: &Path) -> Result<Option<ConfigFile>, String> {
 
 // Apply one config file onto the merged config. Later files override earlier
 // ones by key. API keys are inserted or replaced per provider and are never
-// cleared by omission. Empty model names are ignored so earlier merge layers
-// survive.
+// cleared by omission. Model entries are skipped when absent (None) or when
+// their resolved id is empty, so earlier merge layers survive a partial
+// models object.
 fn apply_file(merged: &mut MergedConfig, file: &ConfigFile) {
     for (provider, value) in &file.api_keys {
         merged.api_keys.insert(provider.clone(), value.clone());
     }
-    if !file.models.small.is_empty() {
-        merged.small_model = file.models.small.clone();
+    if let Some(small) = &file.models.small {
+        if !small.id().is_empty() {
+            merged.small = Some(small.clone());
+        }
     }
-    if !file.models.large.is_empty() {
-        merged.large_model = file.models.large.clone();
+    if let Some(large) = &file.models.large {
+        if !large.id().is_empty() {
+            merged.large = Some(large.clone());
+        }
     }
     if let Some(debug) = file.debug {
         merged.debug = debug;
@@ -342,86 +413,201 @@ fn validate_model_strings(small: &str, large: &str, available: &[String]) -> Vec
     messages
 }
 
-// Validate the configured small and large model strings against each
-// configured provider's /models endpoint. The config is snapshotted and the
-// lock is dropped before any network I/O. Returns the current status when
-// both models are valid; otherwise returns a user-facing error string. Each
-// provider fetch failure is logged to stderr for developers only; the user
-// message stays focused on model validity.
+// Build the user-facing messages for one structured { provider, id } entry.
+// `available` is the provider's fetched model list: None when the list is
+// unavailable (fetch failed), Some(list) when the fetch succeeded. This
+// function is pure so the message format is testable without network I/O.
+fn validate_structured_model(
+    _slot: &str,
+    provider: &str,
+    id: &str,
+    available: Option<&[String]>,
+) -> Vec<String> {
+    match available {
+        None => vec![format!(
+            "could not check model {id}: provider {provider} did not respond"
+        )],
+        Some(list) => {
+            let mut sorted: Vec<&str> = list.iter().map(String::as_str).collect();
+            sorted.sort();
+            sorted.dedup();
+            let joined = if sorted.is_empty() {
+                "(none)".to_string()
+            } else {
+                sorted.join(", ")
+            };
+            if sorted.contains(&id) {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "Invalid model {id} for provider {provider}. Available models: {joined}"
+                )]
+            }
+        }
+    }
+}
+
+// Message for a structured entry whose named provider has no API key
+// configured. The slot (small/large) is labeled so the message identifies
+// which model slot the problem belongs to.
+fn unconfigured_provider_message(slot: &str, provider: &str) -> String {
+    format!("provider {provider} has no API key configured for the {slot} model")
+}
+
+// Validate the configured small and large models. Structured { provider, id }
+// entries are checked against their named provider's /models endpoint only.
+// Legacy plain-string entries keep the old union behavior across all
+// configured providers. The config is snapshotted and the lock is dropped
+// before any network I/O. Returns the current status when the models are
+// valid; otherwise returns a user-facing error string. Each provider fetch
+// failure is logged to stderr for developers only; the user message stays
+// focused on model validity.
 #[tauri::command]
 pub(crate) async fn validate_models(
     state: tauri::State<'_, ConfigState>,
 ) -> Result<ConfigStatus, String> {
     // Snapshot the config under the lock, then drop the guard before network
     // I/O. A poisoned lock is a hard error here: validation needs real values.
-    let (api_keys, small, large, snapshot) = {
+    let snapshot = {
         let guard = match state.inner.lock() {
             Ok(guard) => guard,
             Err(_) => return Err("config state lock is poisoned".to_string()),
         };
-        let snapshot = MergedConfig {
+        MergedConfig {
             api_keys: guard.api_keys.clone(),
-            small_model: guard.small_model.clone(),
-            large_model: guard.large_model.clone(),
+            small: guard.small.clone(),
+            large: guard.large.clone(),
             global_loaded: guard.global_loaded,
             project_loaded: guard.project_loaded,
             project_path: guard.project_path.clone(),
             error: guard.error.clone(),
             debug: guard.debug,
             mock_llm: guard.mock_llm,
-        };
-        (
-            guard.api_keys.clone(),
-            guard.small_model.clone(),
-            guard.large_model.clone(),
-            snapshot,
-        )
+        }
     };
+
+    // Mock mode does not require valid models: the mock provider ignores the
+    // configured model ids and performs no network I/O, so any model string
+    // (or placeholder id) works. Skip validation entirely in mock mode.
+    if snapshot.mock_llm {
+        return Ok(ConfigStatus::from(&snapshot));
+    }
+
+    let api_keys = &snapshot.api_keys;
+    let mut messages: Vec<String> = Vec::new();
+
+    // Structured entries, in slot order. Each carries its named provider, so
+    // it validates against that provider's model list only.
+    let mut structured_entries: Vec<(&str, &str, &str)> = Vec::new();
+    if let Some(ModelSpec::Provider { provider, id }) = &snapshot.small {
+        if !id.is_empty() {
+            structured_entries.push(("small", provider.as_str(), id.as_str()));
+        }
+    }
+    if let Some(ModelSpec::Provider { provider, id }) = &snapshot.large {
+        if !id.is_empty() {
+            structured_entries.push(("large", provider.as_str(), id.as_str()));
+        }
+    }
+
+    // Fetch each named provider at most once, even when both slots name it.
+    let mut fetched: HashMap<&str, Result<Vec<String>, String>> = HashMap::new();
+    for &(slot, provider, id) in &structured_entries {
+        let has_key = api_keys.get(provider).map(|v| !v.is_empty()).unwrap_or(false);
+        if !has_key {
+            messages.push(unconfigured_provider_message(slot, provider));
+            continue;
+        }
+        if !fetched.contains_key(provider) {
+            let key = &api_keys[provider];
+            match crate::llm::fetch_available_models(provider, key).await {
+                Ok(ids) => {
+                    fetched.insert(provider, Ok(ids));
+                }
+                Err(e) => {
+                    eprintln!("[validate_models] provider {provider} fetch failed: {e}");
+                    fetched.insert(provider, Err(e));
+                }
+            }
+        }
+        match &fetched[provider] {
+            Ok(list) => messages.extend(validate_structured_model(slot, provider, id, Some(list))),
+            Err(_) => messages.extend(validate_structured_model(slot, provider, id, None)),
+        }
+    }
+
+    // Legacy entries (plain strings): validate against the union of all
+    // configured providers' model lists. The union fetch runs only when at
+    // least one legacy slot holds a non-empty id.
+    let legacy_small: String = match &snapshot.small {
+        Some(ModelSpec::Id(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let legacy_large: String = match &snapshot.large {
+        Some(ModelSpec::Id(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let union_needed = !legacy_small.is_empty() || !legacy_large.is_empty();
 
     let configured: Vec<(&String, &String)> = api_keys
         .iter()
         .filter(|(_, value)| !value.is_empty())
         .collect();
 
-    if configured.is_empty() {
+    // Preserve the legacy early return: no provider to validate against and
+    // no structured entry that gives another validation path.
+    if configured.is_empty() && structured_entries.is_empty() {
         let message = "No configured providers available to validate models".to_string();
         eprintln!("[validate_models] {message}");
         return Err(message);
     }
 
-    // Query every configured provider. Successful providers contribute their
-    // model ids to the union; failed providers log to stderr only.
-    let mut union: Vec<String> = Vec::new();
-    let mut successes = 0usize;
-    let mut failures: Vec<String> = Vec::new();
-    for (provider, key) in configured {
-        match crate::llm::fetch_available_models(provider, key).await {
-            Ok(ids) => {
-                successes += 1;
-                union.extend(ids);
-            }
-            Err(e) => {
-                eprintln!("[validate_models] provider {provider} fetch failed: {e}");
-                failures.push(format!("provider {provider}: {e}"));
+    if union_needed && !configured.is_empty() {
+        // Query every configured provider. Successful providers contribute
+        // their model ids to the union; failed providers log to stderr only.
+        let mut union: Vec<String> = Vec::new();
+        let mut successes = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for (provider, key) in configured {
+            match crate::llm::fetch_available_models(provider, key).await {
+                Ok(ids) => {
+                    successes += 1;
+                    union.extend(ids);
+                }
+                Err(e) => {
+                    eprintln!("[validate_models] provider {provider} fetch failed: {e}");
+                    failures.push(format!("provider {provider}: {e}"));
+                }
             }
         }
-    }
-    union.sort();
-    union.dedup();
+        union.sort();
+        union.dedup();
 
-    if successes == 0 {
-        // No provider answered at all. There is no validity signal, so the
-        // failure details are the only useful content for the user.
-        let mut message = "All configured providers failed to validate models".to_string();
-        if !failures.is_empty() {
-            message.push_str("; ");
-            message.push_str(&failures.join("; "));
+        if successes == 0 {
+            // No provider answered at all. There is no validity signal, so
+            // the failure details are the only useful content for the user.
+            let mut message = "All configured providers failed to validate models".to_string();
+            if !failures.is_empty() {
+                message.push_str("; ");
+                message.push_str(&failures.join("; "));
+            }
+            eprintln!("[validate_models] {message}");
+            return Err(message);
         }
-        eprintln!("[validate_models] {message}");
-        return Err(message);
+
+        let mut legacy_messages = validate_model_strings(&legacy_small, &legacy_large, &union);
+        // A structured slot in a mixed config is validated against its named
+        // provider only; it must never be reported as "not configured" by the
+        // legacy path.
+        if matches!(&snapshot.small, Some(ModelSpec::Provider { .. })) {
+            legacy_messages.retain(|m| m != "No small model configured");
+        }
+        if matches!(&snapshot.large, Some(ModelSpec::Provider { .. })) {
+            legacy_messages.retain(|m| m != "No large model configured");
+        }
+        messages.extend(legacy_messages);
     }
 
-    let messages = validate_model_strings(&small, &large, &union);
     if !messages.is_empty() {
         let joined = messages.join("; ");
         eprintln!("[validate_models] {joined}");

@@ -148,11 +148,11 @@
   }
 
   // Dispatch a slash command through the Rust task pipeline. When Rust
-  // dispatches a task (currently /fact-check), register it immediately so the
-  // queued card appears, then refine the source range to the focus line using
-  // the byte offsets from task metadata. When Rust does not dispatch
-  // (currently /research, /ignore — not yet wired), fall back to the frontend
-  // timer mock so the pane still shows the command lifecycle.
+  // dispatches a task (/fact-check and /research), register it immediately so
+  // the queued card appears, then refine the source range to the focus line
+  // using the byte offsets from task metadata. When Rust does not dispatch
+  // (only /ignore — recognized but not dispatched yet), fall back to the
+  // frontend mock card.
   async function dispatchSlashCommand(
     detected: DetectedCommand,
     paragraphRange: SourceRange,
@@ -184,8 +184,9 @@
           });
         }
       } else {
-        // Rust did not dispatch this command. Fall back to the mock so the
-        // pane still shows the lifecycle for /research and /ignore.
+        // Rust did not dispatch this command. Only /ignore falls back to the
+        // frontend mock card; it arrives immediately because it is a
+        // directive.
         project.dispatchMockFeedback(detected, paragraphRange);
       }
     } catch (e) {

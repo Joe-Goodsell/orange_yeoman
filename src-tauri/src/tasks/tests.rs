@@ -327,12 +327,15 @@ fn task_result_serializes_camel_case() {
     let result = TaskResult {
         task_id: "t1".to_string(),
         status: TaskStatus::Completed,
+        kind: crate::llm::LlmRequestKind::Research,
         stale: false,
         result: Some(serde_json::json!({"schema_version": 1})),
         error: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(json.contains("\"taskId\""));
+    assert!(json.contains("\"status\":\"completed\""));
+    assert!(json.contains("\"kind\":\"research\""));
     assert!(json.contains("\"schema_version\""));
 }
 
@@ -503,8 +506,8 @@ fn scrub_error_strips_control_chars() {
 // inline dispatch is verified through its pure pieces in the exact order the
 // command wires them: parse the block, build the envelope, derive the task id.
 // The routing contract is covered by the route_block tests below: an inline
-// /ignore or /research command makes submit_block return Ok(None), and an
-// inline /fact-check command is the only dispatch-producing path.
+// /ignore command makes submit_block return Ok(None), and inline /fact-check
+// and /research commands are the dispatch-producing paths.
 
 // A paragraph block with a stable hash, matching the pipeline test helper.
 fn command_block(text: &str) -> crate::pipeline::MarkdownBlock {
@@ -592,15 +595,86 @@ fn inline_ignore_routes_to_ignore_no_dispatch() {
     );
 }
 
-// An inline /research command routes to Research; submit_block returns
-// Ok(None) for that decision (roadmap).
+// An inline /research command routes to Research, the dispatch-producing
+// path for submit_block.
 #[test]
-fn inline_research_routes_to_research_no_dispatch() {
+fn inline_research_routes_to_research_dispatches() {
     let block = command_block("/research what happened at the battle of Hastings");
     let parsed = crate::pipeline::parse_slash_command_in_block(&block).unwrap();
     assert_eq!(parsed.command, crate::pipeline::SlashCommand::Research);
     assert_eq!(
         crate::pipeline::route_block(&block, Some(&parsed)),
         crate::pipeline::RoutingDecision::Research
+    );
+}
+
+// --- llm_call_model_label tests ---
+//
+// The llm_call debug event shows the provider's fixed model (the mock)
+// overriding the request's model hint; the real provider serves the request's
+// configured model; an unset model shows as "<unset>".
+
+fn research_request_with_model(model: Option<&str>) -> crate::llm::LlmRequest {
+    crate::llm::LlmRequest {
+        kind: crate::llm::LlmRequestKind::Research,
+        model: model.map(|m| m.to_string()),
+        system_prompt: None,
+        user_prompt: "prompt".to_string(),
+        max_tokens: None,
+    }
+}
+
+// The mock provider's fixed identity overrides even a configured request model.
+#[test]
+fn llm_call_model_label_mock_overrides_request_model() {
+    let provider = crate::llm::select_provider(true);
+    let request = research_request_with_model(Some("configured-model"));
+    assert_eq!(
+        llm_call_model_label(provider.as_ref(), &request),
+        "mock-provider-v1"
+    );
+}
+
+// The mock provider's fixed identity also covers an unset request model.
+#[test]
+fn llm_call_model_label_mock_with_unset_model() {
+    let provider = crate::llm::select_provider(true);
+    let request = research_request_with_model(None);
+    assert_eq!(
+        llm_call_model_label(provider.as_ref(), &request),
+        "mock-provider-v1"
+    );
+}
+
+// The real provider serves the request's configured model.
+#[test]
+fn llm_call_model_label_real_uses_request_model() {
+    let provider = crate::llm::select_provider(false);
+    let request = research_request_with_model(Some("deepseek-chat"));
+    assert_eq!(
+        llm_call_model_label(provider.as_ref(), &request),
+        "deepseek-chat"
+    );
+}
+
+// An empty request model on the real provider shows as "<unset>".
+#[test]
+fn llm_call_model_label_real_empty_model_is_unset() {
+    let provider = crate::llm::select_provider(false);
+    let request = research_request_with_model(Some(""));
+    assert_eq!(
+        llm_call_model_label(provider.as_ref(), &request),
+        "<unset>"
+    );
+}
+
+// An absent request model on the real provider shows as "<unset>".
+#[test]
+fn llm_call_model_label_real_unset_model_is_unset() {
+    let provider = crate::llm::select_provider(false);
+    let request = research_request_with_model(None);
+    assert_eq!(
+        llm_call_model_label(provider.as_ref(), &request),
+        "<unset>"
     );
 }

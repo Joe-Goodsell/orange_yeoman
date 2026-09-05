@@ -34,22 +34,216 @@ fn malformed_api_keys_error_does_not_leak_secret() {
     assert!(err.contains("line 1"), "missing line info: {err}");
 }
 
-// A partial models object must parse, and each missing field must stay empty
-// (unset) without clobbering earlier merge layers.
+// A partial models object must parse, and each missing field must stay unset
+// (None) without clobbering earlier merge layers.
 #[test]
 fn partial_models_object_leaves_missing_fields_empty() {
     let global: ConfigFile = serde_json::from_str(r#"{"models": {"small": "global-small"}}"#)
         .expect("partial global models must parse");
     let mut merged = MergedConfig::default();
     apply_file(&mut merged, &global);
-    assert_eq!(merged.small_model, "global-small");
-    assert_eq!(merged.large_model, "");
+    assert_eq!(merged.small, Some(ModelSpec::Id("global-small".to_string())));
+    assert_eq!(merged.large, None);
 
     let repo: ConfigFile = serde_json::from_str(r#"{"models": {"large": "repo-large"}}"#)
         .expect("partial repo models must parse");
     apply_file(&mut merged, &repo);
-    assert_eq!(merged.small_model, "global-small");
-    assert_eq!(merged.large_model, "repo-large");
+    assert_eq!(merged.small, Some(ModelSpec::Id("global-small".to_string())));
+    assert_eq!(merged.large, Some(ModelSpec::Id("repo-large".to_string())));
+}
+
+// An empty legacy plain-string model is skipped by apply_file, so it never
+// clobbers an earlier merge layer for the same key.
+#[test]
+fn empty_legacy_model_does_not_clobber_earlier_layer() {
+    let global: ConfigFile = serde_json::from_str(r#"{"models": {"small": "global-small"}}"#)
+        .expect("global model must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+    assert_eq!(merged.small, Some(ModelSpec::Id("global-small".to_string())));
+
+    let repo: ConfigFile = serde_json::from_str(r#"{"models": {"small": ""}}"#)
+        .expect("empty model must parse");
+    apply_file(&mut merged, &repo);
+    assert_eq!(merged.small, Some(ModelSpec::Id("global-small".to_string())));
+}
+
+// The structured { provider, id } form parses into a provider-bound entry.
+#[test]
+fn structured_models_parse() {
+    let file: ConfigFile = serde_json::from_str(
+        r#"{"models": {"small": {"provider": "deepseek", "id": "deepseek-v4-flash"}, "large": {"provider": "openai", "id": "openai-codex-5.6"}}}"#,
+    )
+    .expect("structured models must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &file);
+    assert_eq!(
+        merged.small,
+        Some(ModelSpec::Provider {
+            provider: "deepseek".to_string(),
+            id: "deepseek-v4-flash".to_string(),
+        })
+    );
+    assert_eq!(
+        merged.large,
+        Some(ModelSpec::Provider {
+            provider: "openai".to_string(),
+            id: "openai-codex-5.6".to_string(),
+        })
+    );
+}
+
+// One slot structured and one slot legacy parse together; each keeps its own
+// form.
+#[test]
+fn mixed_models_parse() {
+    let file: ConfigFile = serde_json::from_str(
+        r#"{"models": {"small": {"provider": "deepseek", "id": "deepseek-v4-flash"}, "large": "gpt-4o"}}"#,
+    )
+    .expect("mixed models must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &file);
+    assert_eq!(
+        merged.small,
+        Some(ModelSpec::Provider {
+            provider: "deepseek".to_string(),
+            id: "deepseek-v4-flash".to_string(),
+        })
+    );
+    assert_eq!(merged.large, Some(ModelSpec::Id("gpt-4o".to_string())));
+}
+
+// A project structured model overrides a global legacy model for the same
+// key; the project file is applied after the global file.
+#[test]
+fn project_structured_overrides_global_legacy() {
+    let global: ConfigFile = serde_json::from_str(r#"{"models": {"small": "gpt-4o"}}"#)
+        .expect("global legacy must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+    assert_eq!(merged.small, Some(ModelSpec::Id("gpt-4o".to_string())));
+
+    let project: ConfigFile = serde_json::from_str(
+        r#"{"models": {"small": {"provider": "deepseek", "id": "deepseek-v4-flash"}}}"#,
+    )
+    .expect("project structured must parse");
+    apply_file(&mut merged, &project);
+    assert_eq!(
+        merged.small,
+        Some(ModelSpec::Provider {
+            provider: "deepseek".to_string(),
+            id: "deepseek-v4-flash".to_string(),
+        })
+    );
+}
+
+// An absent models key in a project file preserves the global entry for both
+// slots.
+#[test]
+fn absent_models_key_preserves_global_entry() {
+    let global: ConfigFile = serde_json::from_str(r#"{"models": {"small": "global-small"}}"#)
+        .expect("global model must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &global);
+
+    let project: ConfigFile = serde_json::from_str(r#"{"debug": true}"#)
+        .expect("absent models key must parse");
+    apply_file(&mut merged, &project);
+    assert_eq!(merged.small, Some(ModelSpec::Id("global-small".to_string())));
+    assert_eq!(merged.large, None);
+}
+
+// ConfigStatus exposes the resolved id for both forms and the provider only
+// for the structured form.
+#[test]
+fn config_status_resolves_ids_and_providers() {
+    let file: ConfigFile = serde_json::from_str(
+        r#"{"models": {"small": {"provider": "deepseek", "id": "deepseek-v4-flash"}, "large": "gpt-4o"}}"#,
+    )
+    .expect("mixed models must parse");
+    let mut merged = MergedConfig::default();
+    apply_file(&mut merged, &file);
+    let status = ConfigStatus::from(&merged);
+    assert_eq!(status.small_model, "deepseek-v4-flash");
+    assert_eq!(status.large_model, "gpt-4o");
+    assert_eq!(status.small_provider, Some("deepseek".to_string()));
+    assert_eq!(status.large_provider, None);
+
+    // An unset slot resolves to an empty id and no provider.
+    let empty = ConfigStatus::from(&MergedConfig::default());
+    assert_eq!(empty.small_model, "");
+    assert_eq!(empty.large_model, "");
+    assert_eq!(empty.small_provider, None);
+    assert_eq!(empty.large_provider, None);
+}
+
+// The ConfigState accessors resolve the id for both forms and report the
+// provider only for the structured form.
+#[test]
+fn config_state_accessors_resolve_both_forms() {
+    let state = ConfigState::default();
+    {
+        let mut guard = state.inner.lock().expect("config lock");
+        guard.small = Some(ModelSpec::Provider {
+            provider: "deepseek".to_string(),
+            id: "deepseek-v4-flash".to_string(),
+        });
+        guard.large = Some(ModelSpec::Id("gpt-4o".to_string()));
+    }
+    assert_eq!(state.small_model(), "deepseek-v4-flash");
+    assert_eq!(state.large_model(), "gpt-4o");
+    assert_eq!(state.small_provider(), Some("deepseek".to_string()));
+    assert_eq!(state.large_provider(), None);
+}
+
+// The structured validation helper renders exact messages: an invalid id
+// lists the available models, an unavailable list produces a safe "did not
+// respond" message, and an unconfigured provider produces the slot-labeled
+// API key message.
+#[test]
+fn validate_structured_model_formats_messages() {
+    // Valid id: no messages.
+    let valid = validate_structured_model(
+        "small",
+        "openai",
+        "gpt-4o",
+        Some(&["gpt-4o".to_string(), "gpt-4o-mini".to_string()]),
+    );
+    assert!(valid.is_empty(), "valid id must produce no messages");
+
+    // Unknown id: exact message with the sorted available list.
+    let invalid = validate_structured_model(
+        "small",
+        "openai",
+        "bogus",
+        Some(&["gpt-4o-mini".to_string(), "gpt-4o".to_string()]),
+    );
+    assert_eq!(
+        invalid,
+        vec!["Invalid model bogus for provider openai. Available models: gpt-4o, gpt-4o-mini"
+            .to_string()]
+    );
+
+    // Unavailable list (fetch failed): safe message, no raw error.
+    let failed = validate_structured_model("large", "deepseek", "deepseek-v4-flash", None);
+    assert_eq!(
+        failed,
+        vec!["could not check model deepseek-v4-flash: provider deepseek did not respond"
+            .to_string()]
+    );
+
+    // Empty available list renders the "(none)" placeholder.
+    let empty = validate_structured_model("small", "openai", "bogus", Some(&[]));
+    assert_eq!(
+        empty,
+        vec!["Invalid model bogus for provider openai. Available models: (none)".to_string()]
+    );
+
+    // The unconfigured-provider message labels the slot.
+    assert_eq!(
+        unconfigured_provider_message("small", "deepseek"),
+        "provider deepseek has no API key configured for the small model"
+    );
 }
 
 // The pure validation helper renders exact messages: empty models get a
