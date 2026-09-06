@@ -1,4 +1,5 @@
 use super::*;
+use super::routing::decision_trigger;
 use crate::llm::LlmRequestKind;
 
 // The parser must return no blocks for an empty input.
