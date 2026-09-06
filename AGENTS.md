@@ -31,6 +31,28 @@ Orange Yeoman: an AI-powered macOS app that watches a repository of `.md` notes 
 ## Workflow
 GitHub flow: short-lived feature branches off `main`, merged via PR. The repo is initialized as a git repository on `main` (initial commit `c1a6ac9`).
 
+## Linear ticket status rules
+
+Keep Linear ticket status in sync with the real state of the work. Set the status from the workflow event, not from opinion. The team is `Personal0000` (issue key `PER`); its statuses are Backlog, Todo, In Progress, In Review, Done, Canceled, and Duplicate.
+
+| Workflow event | Ticket status |
+| --- | --- |
+| Ticket is planned; work has not started | Todo |
+| Work starts: feature branch created, or an implementation agent begins edits | In Progress |
+| Review starts: review agent runs, or a PR is open | In Review |
+| Review requests changes | In Progress (fixes are active work) |
+| Branch merges into `main` (local merge agent or GitHub PR merge) | Done |
+| PR closes without merge; the work continues | In Progress |
+| PR closes without merge; the work is abandoned | Canceled |
+| Ticket duplicates another ticket | Duplicate |
+| Ticket is parked and not planned | Backlog |
+
+- Set `Done` only after the branch merges into `main`. A passed review is not `Done`.
+- Do not skip states. Do not move a ticket from `Todo` to `In Review` without edits in between.
+- Put the ticket ID in the branch name and in the PR title (example: `per-42-fix-save`). This links git and GitHub activity to the ticket.
+- These mappings match the Linear GitHub integration defaults. If workspace automations are on, let them move the ticket. Correct the status only when it is wrong.
+- Do not leave a ticket in `In Progress` for many days without a PR. Move it to `Todo` with a comment, or set it to `Canceled`.
+
 ## Agent orchestration (opencode)
 Multi-agent setup lives in `opencode.json` + `.opencode/agents/`. Primary agents (`plan`, `orchestrator`, `build`, `supervisor`) are model-agnostic and use the top-level `model`/`small_model` defaults or whatever model the user selects. Subagents (`explore`, `general`, `scout`, `implementation`, `quick-implementation`, `review`, `merge`, `pr`) pin the cheap model (`opencode-go/deepseek-v4-flash`) in their definitions. Roles and permissions (not models) differentiate the agents.
 
