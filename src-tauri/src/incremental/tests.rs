@@ -1,22 +1,24 @@
 use super::*;
+use crate::pipeline::BlockKind;
 
 // --- helpers ---------------------------------------------------------------
 
-fn stored(id: i64, hash: &str, start: usize) -> StoredBlock {
-    StoredBlock {
-        id,
-        file_path: "notes/a.md".to_string(),
+fn stored(id: i64, hash: &str, start: usize) -> Block {
+    Block {
+        id: Some(id),
         block_hash: hash.to_string(),
+        text: String::new(),
+        kind: BlockKind::Paragraph,
         heading_path: String::new(),
         char_start: start,
         char_end: start + 10,
-        kind: "paragraph".to_string(),
         excluded: false,
     }
 }
 
-fn new_block(hash: &str, start: usize) -> NewBlock {
-    NewBlock {
+fn new_block(hash: &str, start: usize) -> Block {
+    Block {
+        id: None,
         block_hash: hash.to_string(),
         text: hash.to_string(),
         kind: BlockKind::Paragraph,
@@ -173,7 +175,7 @@ fn duplicate_block_relocation_is_moved() {
 #[test]
 fn empty_new_list_is_all_removed() {
     let stored = vec![stored(1, "a", 0), stored(2, "b", 10)];
-    let new: Vec<NewBlock> = Vec::new();
+    let new: Vec<Block> = Vec::new();
     let diff = diff_block_lists(&stored, &new);
     assert_eq!(classes(&diff), vec!["removed", "removed"]);
     assert_eq!(diff.removed, 2);
@@ -182,7 +184,7 @@ fn empty_new_list_is_all_removed() {
 // Empty stored list: everything is Added.
 #[test]
 fn empty_stored_list_is_all_added() {
-    let stored: Vec<StoredBlock> = Vec::new();
+    let stored: Vec<Block> = Vec::new();
     let new = vec![new_block("a", 0), new_block("b", 10)];
     let diff = diff_block_lists(&stored, &new);
     assert_eq!(classes(&diff), vec!["added", "added"]);
@@ -204,8 +206,8 @@ fn full_reorder_is_all_moved() {
 #[test]
 fn set_fallback_classifies_large_lists() {
     let n = MAX_LCS_BLOCKS + 50;
-    let stored: Vec<StoredBlock> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
-    let mut new: Vec<NewBlock> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
+    let stored: Vec<Block> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
+    let mut new: Vec<Block> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
     // Replace one block in place and append a fresh one. The set-membership
     // fallback has no Changed pairing, so the replaced block surfaces as
     // Removed (its old hash is gone) plus Added (the new content), and the
@@ -227,8 +229,8 @@ fn set_fallback_classifies_large_lists() {
 #[test]
 fn lcs_path_runs_at_max_boundary() {
     let n = MAX_LCS_BLOCKS;
-    let stored: Vec<StoredBlock> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
-    let mut new: Vec<NewBlock> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
+    let stored: Vec<Block> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
+    let mut new: Vec<Block> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
     new[7] = new_block("edited", 7 * 10);
     let diff = diff_block_lists(&stored, &new);
     assert_eq!(diff.changed, 1);
@@ -241,8 +243,8 @@ fn lcs_path_runs_at_max_boundary() {
 #[test]
 fn set_fallback_runs_past_max_boundary() {
     let n = MAX_LCS_BLOCKS + 1;
-    let stored: Vec<StoredBlock> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
-    let mut new: Vec<NewBlock> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
+    let stored: Vec<Block> = (0..n).map(|i| stored(i as i64, &format!("s{i}"), i * 10)).collect();
+    let mut new: Vec<Block> = (0..n).map(|i| new_block(&format!("s{i}"), i * 10)).collect();
     new[7] = new_block("edited", 7 * 10);
     let diff = diff_block_lists(&stored, &new);
     assert_eq!(diff.changed, 0);

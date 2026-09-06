@@ -9,9 +9,9 @@
 // occurrences are written by later pipeline stages (PER-33+) and only
 // maintained here (cascade delete + orphan cleanup).
 
-use crate::incremental::{BlockChange, FileDiff, NewBlock, StoredBlock};
+use crate::incremental::{BlockChange, FileDiff};
 use crate::pipeline::{
-    block_kind_as_str, parse_slash_command_in_block, MarkdownBlock, SlashCommand,
+    block_kind_as_str, block_kind_from_str, parse_slash_command_in_block, Block, SlashCommand,
 };
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -171,10 +171,10 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 /// Load one file's stored blocks ordered by start offset.
-pub(crate) fn load_stored_blocks(conn: &Connection, file_path: &Path) -> Vec<StoredBlock> {
+pub(crate) fn load_stored_blocks(conn: &Connection, file_path: &Path) -> Vec<Block> {
     let path_str = file_path.to_string_lossy();
     let mut stmt = match conn.prepare(
-        "SELECT id, file_path, block_hash, heading_path, char_start, char_end, kind, excluded \
+        "SELECT id, block_hash, heading_path, char_start, char_end, kind, excluded \
          FROM blocks WHERE file_path = ?1 ORDER BY char_start",
     ) {
         Ok(stmt) => stmt,
@@ -184,15 +184,15 @@ pub(crate) fn load_stored_blocks(conn: &Connection, file_path: &Path) -> Vec<Sto
         }
     };
     stmt.query_map(params![path_str.as_ref()], |row| {
-        Ok(StoredBlock {
-            id: row.get(0)?,
-            file_path: row.get(1)?,
-            block_hash: row.get(2)?,
-            heading_path: row.get(3)?,
-            char_start: row.get::<_, i64>(4)? as usize,
-            char_end: row.get::<_, i64>(5)? as usize,
-            kind: row.get(6)?,
-            excluded: row.get::<_, i64>(7)? != 0,
+        Ok(Block {
+            id: Some(row.get(0)?),
+            block_hash: row.get(1)?,
+            heading_path: row.get(2)?,
+            char_start: row.get::<_, i64>(3)? as usize,
+            char_end: row.get::<_, i64>(4)? as usize,
+            kind: block_kind_from_str(&row.get::<_, String>(5)?),
+            excluded: row.get::<_, i64>(6)? != 0,
+            text: String::new(),
         })
     })
     .map(|rows| rows.flatten().collect())
@@ -200,18 +200,18 @@ pub(crate) fn load_stored_blocks(conn: &Connection, file_path: &Path) -> Vec<Sto
 }
 
 /// Insert one block row and return its id.
-fn insert_block(conn: &Connection, file_path: &Path, new: &NewBlock) -> Result<i64, rusqlite::Error> {
+fn insert_block(conn: &Connection, file_path: &Path, block: &Block) -> Result<i64, rusqlite::Error> {
     conn.execute(
         "INSERT INTO blocks (file_path, block_hash, heading_path, char_start, char_end, kind, excluded) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             file_path.to_string_lossy().as_ref(),
-            new.block_hash,
-            new.heading_path,
-            new.char_start as i64,
-            new.char_end as i64,
-            block_kind_as_str(&new.kind),
-            new.excluded as i64,
+            block.block_hash,
+            block.heading_path,
+            block.char_start as i64,
+            block.char_end as i64,
+            block_kind_as_str(&block.kind),
+            block.excluded as i64,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -277,23 +277,14 @@ fn now_millis() -> i64 {
 
 /// Enqueue filter: excluded blocks (front matter, code fences, HTML) and
 /// blocks carrying an `/ignore` slash command are stored but never enqueued.
-fn should_enqueue(new: &NewBlock) -> bool {
-    if new.excluded {
+fn should_enqueue(block: &Block) -> bool {
+    if block.excluded {
         return false;
     }
-    // Re-run the existing slash-command parser over the block text. Only the
-    // /ignore command suppresses queueing; fact-check and research blocks
-    // still enqueue (band routing is out of scope for this ticket).
-    let block = MarkdownBlock {
-        kind: new.kind.clone(),
-        text: new.text.clone(),
-        start: 0,
-        end: 0,
-        heading_chain: Vec::new(),
-        excluded: new.excluded,
-        block_hash: new.block_hash.clone(),
-    };
-    match parse_slash_command_in_block(&block) {
+    // Run the slash-command parser over the block text. Only the /ignore
+    // command suppresses queueing; fact-check and research blocks still
+    // enqueue (band routing is out of scope for this ticket).
+    match parse_slash_command_in_block(block) {
         Some(parsed) => parsed.command != SlashCommand::Ignore,
         None => true,
     }
@@ -306,6 +297,20 @@ pub(crate) struct ApplyStats {
     pub(crate) updated: usize,
     pub(crate) deleted: usize,
     pub(crate) enqueued: usize,
+}
+
+/// Row id of a stored-side diff block. Stored-side blocks come from
+/// `load_stored_blocks`, so they always carry ids; a None (logged) means the
+/// invariant broke and the caller must abort the apply pass so the open
+/// transaction rolls back.
+fn stored_row_id(block: &Block) -> Option<i64> {
+    if block.id.is_none() {
+        tracing::error!(
+            category = "store",
+            "apply_diff: stored-side block without row id; rolling back"
+        );
+    }
+    block.id
 }
 
 /// Apply a file diff to the store in one transaction:
@@ -331,18 +336,27 @@ pub(crate) fn apply_diff(conn: &mut Connection, path: &Path, diff: &FileDiff) ->
     for change in &diff.changes {
         let result = match change {
             BlockChange::Unchanged { stored, new } | BlockChange::Moved { stored, new } => {
+                let Some(id) = stored_row_id(stored) else {
+                    return stats;
+                };
                 stats.updated += 1;
-                update_block_position(&tx, stored.id, new.char_start, new.char_end, &new.heading_path)
+                update_block_position(&tx, id, new.char_start, new.char_end, &new.heading_path)
             }
             BlockChange::Removed { stored } => {
+                let Some(id) = stored_row_id(stored) else {
+                    return stats;
+                };
                 deleted_any = true;
                 stats.deleted += 1;
-                delete_block(&tx, stored.id)
+                delete_block(&tx, id)
             }
             BlockChange::Changed { old, new } => {
+                let Some(old_id) = stored_row_id(old) else {
+                    return stats;
+                };
                 deleted_any = true;
                 stats.deleted += 1;
-                if let Err(e) = delete_block(&tx, old.id) {
+                if let Err(e) = delete_block(&tx, old_id) {
                     return apply_error(stats, e);
                 }
                 if let Err(e) = insert_block(&tx, path, new) {
@@ -429,8 +443,7 @@ pub(crate) fn process_file_content(
     path: &Path,
     content: &str,
 ) -> (FileDiff, ApplyStats) {
-    let blocks = crate::pipeline::parse_markdown_blocks(content);
-    let new: Vec<NewBlock> = blocks.iter().map(NewBlock::from_block).collect();
+    let new = crate::pipeline::parse_markdown_blocks(content);
     let stored = load_stored_blocks(conn, path);
     let diff = crate::incremental::diff_block_lists(&stored, &new);
     let stats = apply_diff(conn, path, &diff);

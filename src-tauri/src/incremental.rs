@@ -4,7 +4,7 @@
 // rows (concepts stay attached), and removed blocks are deleted. Pure module:
 // no I/O, no database. The apply step lives in store.rs.
 
-use crate::pipeline::{BlockKind, MarkdownBlock};
+use crate::pipeline::Block;
 use std::collections::VecDeque;
 
 /// Above this many blocks on either side, the O(n*m) LCS table is replaced by
@@ -12,60 +12,17 @@ use std::collections::VecDeque;
 /// (~50 MB worst case); bigger files are matched by hash membership only.
 pub(crate) const MAX_LCS_BLOCKS: usize = 5000;
 
-/// Mirror of one `blocks` row, as loaded from the store. `kind` is the text
-/// spelling stored in the DB (see `block_kind_as_str`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredBlock {
-    pub(crate) id: i64,
-    pub(crate) file_path: String,
-    pub(crate) block_hash: String,
-    pub(crate) heading_path: String,
-    pub(crate) char_start: usize,
-    pub(crate) char_end: usize,
-    pub(crate) kind: String,
-    pub(crate) excluded: bool,
-}
-
-/// A freshly parsed block, not yet in the store. Built from a `MarkdownBlock`.
-/// `text` is carried so the apply step can re-run the slash-command parser for
-/// the `/ignore` enqueue filter. `heading_path` is the heading chain joined
-/// with " > " (same separator the prompt builders use).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NewBlock {
-    pub(crate) block_hash: String,
-    pub(crate) text: String,
-    pub(crate) kind: BlockKind,
-    pub(crate) heading_path: String,
-    pub(crate) char_start: usize,
-    pub(crate) char_end: usize,
-    pub(crate) excluded: bool,
-}
-
-impl NewBlock {
-    pub(crate) fn from_block(block: &MarkdownBlock) -> NewBlock {
-        NewBlock {
-            block_hash: block.block_hash.clone(),
-            text: block.text.clone(),
-            kind: block.kind.clone(),
-            heading_path: block.heading_chain.join(" > "),
-            char_start: block.start,
-            char_end: block.end,
-            excluded: block.excluded,
-        }
-    }
-}
-
 /// One classification from the diff, carrying the fields the apply step needs.
 /// `Unchanged` and `Moved` keep the stored row id plus the new positions:
 /// offsets shift after edits above the block, so apply refreshes
 /// char_start/char_end/heading_path for both even when the hash did not change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlockChange {
-    Unchanged { stored: StoredBlock, new: NewBlock },
-    Added { new: NewBlock },
-    Changed { old: StoredBlock, new: NewBlock },
-    Moved { stored: StoredBlock, new: NewBlock },
-    Removed { stored: StoredBlock },
+    Unchanged { stored: Block, new: Block },
+    Added { new: Block },
+    Changed { old: Block, new: Block },
+    Moved { stored: Block, new: Block },
+    Removed { stored: Block },
 }
 
 /// The outcome of diffing one file: the ordered change list plus per-class
@@ -107,7 +64,7 @@ impl FileDiff {
 ///    `Added`.
 ///
 /// Above `MAX_LCS_BLOCKS` on either side the fallback `diff_by_set` runs.
-pub(crate) fn diff_block_lists(stored: &[StoredBlock], new: &[NewBlock]) -> FileDiff {
+pub(crate) fn diff_block_lists(stored: &[Block], new: &[Block]) -> FileDiff {
     if stored.len() > MAX_LCS_BLOCKS || new.len() > MAX_LCS_BLOCKS {
         return diff_by_set(stored, new);
     }
@@ -133,9 +90,9 @@ pub(crate) fn diff_block_lists(stored: &[StoredBlock], new: &[NewBlock]) -> File
     // everything else is collected into the two global unmatched runs so the
     // relocation pairing in step 3 can see both sides of a move even when the
     // LCS split them across different gaps.
-    let mut matched: Vec<(bool, StoredBlock, NewBlock)> = Vec::new();
-    let mut unmatched_stored: Vec<StoredBlock> = Vec::new();
-    let mut unmatched_new: Vec<NewBlock> = Vec::new();
+    let mut matched: Vec<(bool, Block, Block)> = Vec::new();
+    let mut unmatched_stored: Vec<Block> = Vec::new();
+    let mut unmatched_new: Vec<Block> = Vec::new();
     let mut i = 0usize;
     let mut j = 0usize;
     while i < n && j < m {
@@ -177,9 +134,9 @@ pub(crate) fn diff_block_lists(stored: &[StoredBlock], new: &[NewBlock]) -> File
 
     // Step 3: pair unmatched stored hashes with the first remaining unmatched
     // new block of the same hash, in order.
-    let mut remaining_new: VecDeque<NewBlock> = unmatched_new.into_iter().collect();
-    let mut moved_pairs: Vec<(StoredBlock, NewBlock)> = Vec::new();
-    let mut leftover_stored: Vec<StoredBlock> = Vec::new();
+    let mut remaining_new: VecDeque<Block> = unmatched_new.into_iter().collect();
+    let mut moved_pairs: Vec<(Block, Block)> = Vec::new();
+    let mut leftover_stored: Vec<Block> = Vec::new();
     for stored_block in unmatched_stored {
         let found = remaining_new
             .iter()
@@ -192,7 +149,7 @@ pub(crate) fn diff_block_lists(stored: &[StoredBlock], new: &[NewBlock]) -> File
             None => leftover_stored.push(stored_block),
         }
     }
-    let leftover_new: Vec<NewBlock> = remaining_new.into_iter().collect();
+    let leftover_new: Vec<Block> = remaining_new.into_iter().collect();
 
     // Step 4: position-adjacent pairing into Changed; leftovers to Removed /
     // Added.
@@ -227,9 +184,9 @@ pub(crate) fn diff_block_lists(stored: &[StoredBlock], new: &[NewBlock]) -> File
 /// Set-membership fallback for very large files (no O(n*m) table, no Changed
 /// pairing): in both + same index -> Unchanged; in both + different index ->
 /// Moved; only stored -> Removed; only new -> Added.
-fn diff_by_set(stored: &[StoredBlock], new: &[NewBlock]) -> FileDiff {
+fn diff_by_set(stored: &[Block], new: &[Block]) -> FileDiff {
     let mut diff = FileDiff::default();
-    let mut new_remaining: VecDeque<(usize, &NewBlock)> = new.iter().enumerate().collect();
+    let mut new_remaining: VecDeque<(usize, &Block)> = new.iter().enumerate().collect();
 
     for (i, stored_block) in stored.iter().enumerate() {
         let found = new_remaining

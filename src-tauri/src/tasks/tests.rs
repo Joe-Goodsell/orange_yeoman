@@ -533,15 +533,16 @@ fn scrub_error_strips_control_chars() {
 // and /research commands are the dispatch-producing paths.
 
 // A paragraph block with a stable hash, matching the pipeline test helper.
-fn command_block(text: &str) -> crate::pipeline::MarkdownBlock {
-    crate::pipeline::MarkdownBlock {
+fn command_block(text: &str) -> crate::pipeline::Block {
+    crate::pipeline::Block {
+        id: None,
         kind: crate::pipeline::BlockKind::Paragraph,
         text: text.to_string(),
-        start: 0,
-        end: text.len(),
-        heading_chain: vec![],
-        excluded: false,
         block_hash: crate::pipeline::stable_hash(text),
+        heading_path: String::new(),
+        char_start: 0,
+        char_end: text.len(),
+        excluded: false,
     }
 }
 

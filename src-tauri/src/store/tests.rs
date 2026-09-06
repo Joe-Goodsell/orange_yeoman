@@ -1,6 +1,6 @@
 use super::*;
-use crate::incremental::{diff_block_lists, NewBlock, StoredBlock};
-use crate::pipeline::{block_kind_as_str, stable_hash, BlockKind};
+use crate::incremental::diff_block_lists;
+use crate::pipeline::{stable_hash, Block, BlockKind};
 use std::fs;
 use std::path::Path;
 
@@ -12,21 +12,22 @@ fn conn() -> Connection {
     conn
 }
 
-fn stored(id: i64, hash: &str, start: usize) -> StoredBlock {
-    StoredBlock {
-        id,
-        file_path: "notes/a.md".to_string(),
+fn stored(id: i64, hash: &str, start: usize) -> Block {
+    Block {
+        id: Some(id),
         block_hash: hash.to_string(),
+        text: String::new(),
+        kind: BlockKind::Paragraph,
         heading_path: String::new(),
         char_start: start,
         char_end: start + 10,
-        kind: "paragraph".to_string(),
         excluded: false,
     }
 }
 
-fn nblock(hash: &str, start: usize) -> NewBlock {
-    NewBlock {
+fn nblock(hash: &str, start: usize) -> Block {
+    Block {
+        id: None,
         block_hash: hash.to_string(),
         text: hash.to_string(),
         kind: BlockKind::Paragraph,
@@ -87,12 +88,13 @@ fn insert_and_load_block_roundtrip() {
     let rows = load_stored_blocks(&conn, Path::new("notes/a.md"));
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    assert_eq!(row.id, id);
+    assert_eq!(row.id, Some(id));
     assert_eq!(row.block_hash, "h1");
     assert_eq!(row.heading_path, "H1 > H2");
     assert_eq!(row.char_start, 0);
     assert_eq!(row.char_end, 10);
-    assert_eq!(row.kind, block_kind_as_str(&BlockKind::CodeFence));
+    assert_eq!(row.kind, BlockKind::CodeFence);
+    assert_eq!(row.text, "");
     assert!(row.excluded);
 }
 
@@ -148,9 +150,9 @@ fn relink_blocks_repoints_rows_and_keeps_occurrences() {
     // Both rows now live under the new path, ids and hashes preserved.
     let rows = load_stored_blocks(&conn, Path::new("notes/b.md"));
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].id, b1);
+    assert_eq!(rows[0].id, Some(b1));
     assert_eq!(rows[0].block_hash, "a");
-    assert_eq!(rows[1].id, b2);
+    assert_eq!(rows[1].id, Some(b2));
     assert_eq!(rows[1].block_hash, "b");
     // The occurrence stayed attached to its row; relink never enqueues.
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM occurrences"), 1);
@@ -168,8 +170,8 @@ fn apply_moved_updates_position_without_enqueue() {
     let id = insert_block(&conn, Path::new("notes/a.md"), &nblock("h", 0)).unwrap();
     insert_concept_with_occurrence(&conn, id, "kept");
 
-    let old = StoredBlock {
-        id,
+    let old = Block {
+        id: Some(id),
         char_start: 0,
         ..stored(id, "h", 0)
     };
@@ -189,7 +191,7 @@ fn apply_moved_updates_position_without_enqueue() {
 
     let rows = load_stored_blocks(&conn, Path::new("notes/a.md"));
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].id, Some(id));
     assert_eq!(rows[0].char_start, 20);
     assert_eq!(rows[0].char_end, 30);
     assert_eq!(rows[0].heading_path, "New > Heading");
@@ -322,9 +324,10 @@ fn apply_stores_excluded_without_enqueue() {
 #[test]
 fn apply_stores_ignore_block_without_enqueue() {
     let conn = conn();
+    let text = "/ignore this paragraph entirely";
     let mut block = nblock("ignored", 0);
-    block.text = "/ignore this paragraph entirely".to_string();
-    block.block_hash = stable_hash(&block.text);
+    block.text = text.to_string();
+    block.block_hash = stable_hash(text);
     let diff = FileDiff {
         changes: vec![BlockChange::Added { new: block }],
         ..FileDiff::default()
@@ -343,9 +346,10 @@ fn apply_stores_ignore_block_without_enqueue() {
 fn apply_enqueues_fact_check_and_research_blocks() {
     for command in ["/fact-check", "/research"] {
         let mut conn = conn();
+        let text = format!("{command} this paragraph");
         let mut block = nblock(command, 0);
-        block.text = format!("{command} this paragraph");
-        block.block_hash = stable_hash(&block.text);
+        block.text = text.clone();
+        block.block_hash = stable_hash(&text);
         let diff = FileDiff {
             changes: vec![BlockChange::Added { new: block }],
             ..FileDiff::default()
@@ -425,17 +429,20 @@ fn process_file_content_end_to_end() {
         .iter()
         .find(|r| r.block_hash == stable_hash("Para A EDITED."))
         .unwrap()
-        .id;
+        .id
+        .expect("stored row id");
     let h1_id = rows
         .iter()
         .find(|r| r.block_hash == stable_hash("# H1"))
         .unwrap()
-        .id;
+        .id
+        .expect("stored row id");
     let pc_id = rows
         .iter()
         .find(|r| r.block_hash == stable_hash("Para C."))
         .unwrap()
-        .id;
+        .id
+        .expect("stored row id");
     let orphan = insert_concept_with_occurrence(&conn, pa_id, "only_in_para_a");
     let shared = insert_concept_with_occurrence(&conn, h1_id, "across_blocks");
     conn.execute(
@@ -485,10 +492,7 @@ fn apply_then_reprocess_is_unchanged() {
     // diff_block_lists itself is pure: the same inputs always classify the
     // same way.
     let stored_blocks = load_stored_blocks(&conn, path);
-    let parsed: Vec<NewBlock> = crate::pipeline::parse_markdown_blocks(content)
-        .iter()
-        .map(NewBlock::from_block)
-        .collect();
+    let parsed = crate::pipeline::parse_markdown_blocks(content);
     let third = diff_block_lists(&stored_blocks, &parsed);
     assert_eq!(third.unchanged, 3);
 }

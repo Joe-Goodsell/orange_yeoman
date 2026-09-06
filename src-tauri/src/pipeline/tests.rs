@@ -15,11 +15,11 @@ fn single_paragraph_offsets() {
     assert_eq!(blocks.len(), 1);
     let block = &blocks[0];
     assert_eq!(block.kind, BlockKind::Paragraph);
-    assert_eq!(block.start, 0);
+    assert_eq!(block.char_start, 0);
     // "Hello world." is 12 bytes.
-    assert_eq!(block.end, 12);
+    assert_eq!(block.char_end, 12);
     assert_eq!(block.text, "Hello world.");
-    assert!(block.heading_chain.is_empty());
+    assert!(block.heading_path.is_empty());
     assert!(!block.excluded);
 }
 
@@ -33,16 +33,16 @@ fn heading_then_paragraph() {
     let heading = &blocks[0];
     assert_eq!(heading.kind, BlockKind::Heading);
     assert_eq!(heading.text, "# Title");
-    assert_eq!(heading.start, 0);
-    assert_eq!(heading.end, 7);
-    assert!(heading.heading_chain.is_empty());
+    assert_eq!(heading.char_start, 0);
+    assert_eq!(heading.char_end, 7);
+    assert!(heading.heading_path.is_empty());
 
     let body = &blocks[1];
     assert_eq!(body.kind, BlockKind::Paragraph);
     assert_eq!(body.text, "Body text.");
-    assert_eq!(body.start, 9);
-    assert_eq!(body.end, 19);
-    assert_eq!(body.heading_chain, vec!["Title".to_string()]);
+    assert_eq!(body.char_start, 9);
+    assert_eq!(body.char_end, 19);
+    assert_eq!(body.heading_path, "Title");
 }
 
 // "# H1" is bytes 0..4, "## H2" is bytes 6..11, "Para." is bytes 13..18.
@@ -55,9 +55,9 @@ fn nested_heading_chain() {
     let para = &blocks[2];
     assert_eq!(para.kind, BlockKind::Paragraph);
     assert_eq!(para.text, "Para.");
-    assert_eq!(para.start, 13);
-    assert_eq!(para.end, 18);
-    assert_eq!(para.heading_chain, vec!["H1".to_string(), "H2".to_string()]);
+    assert_eq!(para.char_start, 13);
+    assert_eq!(para.char_end, 18);
+    assert_eq!(para.heading_path, "H1 > H2");
 }
 
 // The fenced block spans bytes 0..17 ("```\ncode here\n```"); "After." is
@@ -74,7 +74,7 @@ fn fenced_code_excluded() {
     let after = &blocks[1];
     assert_eq!(after.kind, BlockKind::Paragraph);
     assert_eq!(after.text, "After.");
-    assert!(after.heading_chain.is_empty());
+    assert!(after.heading_path.is_empty());
 }
 
 // The front matter spans bytes 0..16 ("---\nfoo: bar\n---"); "Text." is
@@ -142,7 +142,7 @@ fn offsets_slice_to_block_text() {
     let blocks = parse_markdown_blocks(input);
     assert_eq!(blocks.len(), 4);
     for block in &blocks {
-        assert_eq!(&input[block.start..block.end], block.text);
+        assert_eq!(&input[block.char_start..block.char_end], block.text);
     }
 }
 
@@ -158,7 +158,7 @@ fn multibyte_offsets_are_bytes() {
     assert_eq!(blocks[0].kind, BlockKind::Heading);
     assert_eq!(blocks[1].kind, BlockKind::Paragraph);
     for block in &blocks {
-        assert_eq!(&input[block.start..block.end], block.text);
+        assert_eq!(&input[block.char_start..block.char_end], block.text);
     }
     assert_eq!(blocks[0].text, "# Título con ñ");
     assert_eq!(blocks[1].text, "Un párrafo con é.");
@@ -173,7 +173,7 @@ fn multibyte_offsets_are_bytes() {
 // and returns the first match.
 
 // A paragraph block with a stable hash, for single-line command tests.
-fn command_block(text: &str) -> MarkdownBlock {
+fn command_block(text: &str) -> Block {
     let mut block = block_for(text);
     block.block_hash = stable_hash(text);
     block
@@ -285,12 +285,13 @@ fn unknown_command_returns_none() {
 // treated as a command.
 #[test]
 fn command_not_in_excluded_block() {
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::CodeFence,
         text: "```\n/fact-check\n```".to_string(),
-        start: 0,
-        end: 17,
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: 17,
+        heading_path: String::new(),
         excluded: true,
         block_hash: stable_hash("```\n/fact-check\n```"),
     };
@@ -319,7 +320,7 @@ fn block_returns_first_command_line() {
 }
 
 // line_start/line_end are block-relative byte offsets that slice back to the
-// exact command line; adding block.start yields file offsets.
+// exact command line; adding block.char_start yields file offsets.
 #[test]
 fn offsets_slice_to_command_line() {
     let input = "First line.\n/research battles\nLast line.";
@@ -330,8 +331,8 @@ fn offsets_slice_to_command_line() {
         &block.text[parsed.line_start..parsed.line_end],
         "/research battles"
     );
-    assert_eq!(block.start + parsed.line_start, 12);
-    assert_eq!(block.start + parsed.line_end, 29);
+    assert_eq!(block.char_start + parsed.line_start, 12);
+    assert_eq!(block.char_start + parsed.line_end, 29);
 }
 
 // The parsed struct carries the block's own hash.
@@ -347,12 +348,13 @@ fn parsed_uses_block_hash() {
 #[test]
 fn inline_envelope_fields() {
     let text = "First line.\n/fact-check amperes are tricky.\nThird line.";
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::Paragraph,
         text: text.to_string(),
-        start: 100,
-        end: 100 + text.len(),
-        heading_chain: vec![],
+        char_start: 100,
+        char_end: 100 + text.len(),
+        heading_path: String::new(),
         excluded: false,
         block_hash: stable_hash(text),
     };
@@ -473,12 +475,13 @@ fn inline_task_id_distinct_for_fact_check_vs_research() {
 
 // A paragraph block classified with all unused fields zeroed/empty.
 fn signals_for(text: &str) -> LocalSignals {
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::Paragraph,
         text: text.to_string(),
-        start: 0,
-        end: text.len(),
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: text.len(),
+        heading_path: String::new(),
         excluded: false,
         block_hash: String::new(),
     };
@@ -555,12 +558,13 @@ fn gap_phrase_signal() {
 
 #[test]
 fn topic_heading_signal() {
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::Heading,
         text: "# Medieval Cavalry".to_string(),
-        start: 0,
-        end: 18,
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: 18,
+        heading_path: String::new(),
         excluded: false,
         block_hash: String::new(),
     };
@@ -597,12 +601,13 @@ fn speculation_negative() {
 
 #[test]
 fn excluded_block_has_no_signals() {
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::CodeFence,
         text: "```\n450 celsius\n```".to_string(),
-        start: 0,
-        end: 17,
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: 17,
+        heading_path: String::new(),
         excluded: true,
         block_hash: String::new(),
     };
@@ -638,13 +643,14 @@ fn plain_opinion_low_score() {
 // --- route_block tests ---
 
 // A normal paragraph block with all unused fields zeroed/empty.
-fn block_for(text: &str) -> MarkdownBlock {
-    MarkdownBlock {
+fn block_for(text: &str) -> Block {
+    Block {
+        id: None,
         kind: BlockKind::Paragraph,
         text: text.to_string(),
-        start: 0,
-        end: text.len(),
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: text.len(),
+        heading_path: String::new(),
         excluded: false,
         block_hash: String::new(),
     }
@@ -780,12 +786,13 @@ fn decision_trigger_mapping() {
 // Excluded blocks produce no command, and the guard still skips them.
 #[test]
 fn fact_check_command_on_excluded_block_still_skip() {
-    let block = MarkdownBlock {
+    let block = Block {
+        id: None,
         kind: BlockKind::CodeFence,
         text: "```\n/fact-check\n```".to_string(),
-        start: 0,
-        end: 17,
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: 17,
+        heading_path: String::new(),
         excluded: true,
         block_hash: stable_hash("```\n/fact-check\n```"),
     };
@@ -797,13 +804,14 @@ fn fact_check_command_on_excluded_block_still_skip() {
 
 // A normal paragraph block with all unused fields zeroed/empty, for the
 // prompt builders.
-fn prompt_block(text: &str) -> MarkdownBlock {
-    MarkdownBlock {
+fn prompt_block(text: &str) -> Block {
+    Block {
+        id: None,
         kind: BlockKind::Paragraph,
         text: text.to_string(),
-        start: 0,
-        end: text.len(),
-        heading_chain: vec![],
+        char_start: 0,
+        char_end: text.len(),
+        heading_path: String::new(),
         excluded: false,
         block_hash: String::new(),
     }
@@ -842,7 +850,7 @@ fn extraction_prompt_states_reference_material() {
 
 #[test]
 fn fact_check_request_kind_and_model() {
-    let req = build_fact_check_request("claim", "block", &[], "hash1", "fc-1");
+    let req = build_fact_check_request("claim", "block", "", "hash1", "fc-1");
     assert_eq!(req.kind, LlmRequestKind::FactCheck);
     assert_eq!(req.model, Some("fc-1".to_string()));
     assert_eq!(
@@ -856,7 +864,7 @@ fn fact_check_prompt_contains_claim_and_context() {
     let req = build_fact_check_request(
         "The claim text.",
         "The block text.",
-        &["H1".to_string()],
+        "H1",
         "abc123",
         "fc-1",
     );
@@ -875,13 +883,13 @@ fn fact_check_prompt_heading_chain_join() {
     let with_chain = build_fact_check_request(
         "claim",
         "block",
-        &["H1".to_string(), "H2".to_string()],
+        "H1 > H2",
         "hash",
         "fc-1",
     );
     assert!(with_chain.user_prompt.contains("Heading chain: H1 > H2"));
 
-    let no_chain = build_fact_check_request("claim", "block", &[], "hash", "fc-1");
+    let no_chain = build_fact_check_request("claim", "block", "", "hash", "fc-1");
     assert!(no_chain.user_prompt.contains("Heading chain: (none)"));
 }
 
@@ -921,8 +929,8 @@ fn prompt_determinism() {
     assert_eq!(a.user_prompt, b.user_prompt);
     assert_eq!(a.system_prompt, b.system_prompt);
 
-    let fc_a = build_fact_check_request("c", "b", &["H1".to_string()], "h", "fc-1");
-    let fc_b = build_fact_check_request("c", "b", &["H1".to_string()], "h", "fc-1");
+    let fc_a = build_fact_check_request("c", "b", "H1", "h", "fc-1");
+    let fc_b = build_fact_check_request("c", "b", "H1", "h", "fc-1");
     assert_eq!(fc_a.user_prompt, fc_b.user_prompt);
     assert_eq!(fc_a.system_prompt, fc_b.system_prompt);
 
@@ -961,7 +969,7 @@ fn max_tokens_budgets() {
         Some(500)
     );
     assert_eq!(
-        build_fact_check_request("c", "b", &[], "h", "fc-1").max_tokens,
+        build_fact_check_request("c", "b", "", "h", "fc-1").max_tokens,
         Some(1500)
     );
     assert_eq!(

@@ -632,7 +632,7 @@ pub(crate) async fn submit_block(
             let request = crate::pipeline::build_fact_check_request(
                 &parsed.focus_text,
                 &block.text,
-                &block.heading_chain,
+                &block.heading_path,
                 &source_hash,
                 &small_model,
             );
@@ -801,7 +801,7 @@ pub(crate) async fn submit_fact_check(
     let request = crate::pipeline::build_fact_check_request(
         &claim_text,
         &block_text,
-        &heading_chain,
+        &heading_chain.join(" > "),
         &source_hash,
         &small_model,
     );

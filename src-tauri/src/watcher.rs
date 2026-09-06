@@ -225,14 +225,14 @@ fn snapshots_of(content: &str) -> Vec<BlockSnapshot> {
             // quotes do not), so the byte before it is a newline and the naive
             // line count runs one line past the item. Back off one byte when
             // that happens; clamp so the range never collapses.
-            let end_offset = if block.end > block.start
-                && content.as_bytes().get(block.end - 1) == Some(&b'\n')
+            let end_offset = if block.char_end > block.char_start
+                && content.as_bytes().get(block.char_end - 1) == Some(&b'\n')
             {
-                block.end - 1
+                block.char_end - 1
             } else {
-                block.end
+                block.char_end
             };
-            let start_line = line_of(content, block.start);
+            let start_line = line_of(content, block.char_start);
             BlockSnapshot {
                 hash: block.block_hash,
                 start_line,
