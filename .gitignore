@@ -34,5 +34,8 @@ vite.config.ts.timestamp-*
 !.vscode/extensions.json
 .idea/
 
-# Agent session memory (local working state)
+# Agent / opencode tooling and session state (local only; untracked)
 memories/
+opencode.json
+.opencode/
+AGENTS.md

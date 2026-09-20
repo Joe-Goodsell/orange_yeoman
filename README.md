@@ -51,7 +51,6 @@ src-tauri/    Rust core + Tauri config
 docs/         Documentation
 research/     Research notes
 outline.md    Project intent / source of truth
-AGENTS.md     Agent + stack rules
 ```
 
 ## Roadmap
