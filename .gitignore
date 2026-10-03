@@ -35,7 +35,7 @@ vite.config.ts.timestamp-*
 .idea/
 
 # Agent / opencode tooling and session state (local only; untracked)
-memories/
-opencode.json
-.opencode/
-AGENTS.md
+# memories/
+# opencode.json
+# .opencode/
+# AGENTS.md
