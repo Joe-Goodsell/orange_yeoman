@@ -328,6 +328,13 @@
             },
             ".cm-content": {
               padding: "12px 16px",
+              // The base theme sets caret-color: black under its `&light`
+              // scope (no `{dark: true}` theme is registered, so the light
+              // scope applies in app dark mode too) and the editor surface is
+              // transparent, so the caret would be invisible on the dark
+              // background. currentColor resolves to the inherited app text
+              // colour (#1c1c1e light / #e6e6e6 dark) — high contrast in both.
+              caretColor: "currentColor",
             },
           }),
         ],

@@ -8,12 +8,27 @@
   background-color: #ffffff;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Editor token colours. Each must keep >= 4.5:1 contrast against the plain
+     background and against every `.cm-feedback-*` tint composite in its mode;
+     `pnpm contrast` verifies this. */
+  --oy-code: #2f6142;
+  --oy-link: #2a5fa8;
+  --oy-marker: #626262;
+  --oy-list: #6a4f8c;
+  --oy-heading: #465a76;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color: #e6e6e6;
     background-color: #1e1e1e;
+    /* Dark-mode overrides of the editor token colours; same contrast
+       requirement as the light values above. */
+    --oy-code: #8ecda6;
+    --oy-link: #7faee8;
+    --oy-marker: #adadad;
+    --oy-list: #c2a9e0;
+    --oy-heading: #9db2d0;
   }
 }
 

@@ -11,12 +11,12 @@
 //
 // Palette choice: the app follows the OS theme (`color-scheme: light dark` in
 // app.css) with a #ffffff surface in light mode and a #1e1e1e surface in dark
-// mode. Rather than maintain two HighlightStyle tables, the colors below are a
-// single muted mid-tone palette. Each color's luminance sits between the two
-// backgrounds, keeping contrast readable in both modes (roughly 3:1 to 5:1
-// against either surface) while staying subtle enough for the distraction-free
-// main pane. Weight and style carry the rest of the distinction: headings are
-// semibold, emphasis is italic, strong is bold.
+// mode. The token colours are CSS variables defined in app.css (--oy-link,
+// --oy-code, --oy-marker, --oy-list, --oy-heading) with per-mode values, so
+// each token keeps its distinct hue AND at least 4.5:1 contrast against the
+// plain background and against every `.cm-feedback-*` tint composite in its
+// mode. `pnpm contrast` verifies this. Weight and style carry the rest of the
+// distinction: headings are semibold, emphasis is italic, strong is bold.
 //
 // Rule order matters: for nodes that carry multiple tags (e.g. the `#` of a
 // heading carries both `heading` and `processingInstruction`), later rules
@@ -36,22 +36,22 @@ const markdownHighlightStyle = HighlightStyle.define([
   // Strong: weight carries the distinction; color follows the body text.
   { tag: tags.strong, fontWeight: "bold" },
   // Links and their URLs: muted accent blue, clearly distinct from body text.
-  { tag: [tags.link, tags.url], color: "#4a86c8" },
+  { tag: [tags.link, tags.url], color: "var(--oy-link)" },
   // Inline code, fenced code bodies, and fence info labels: muted green.
-  { tag: [tags.monospace, tags.labelName], color: "#3f7a54" },
+  { tag: [tags.monospace, tags.labelName], color: "var(--oy-code)" },
   // Block quotes and thematic breaks: dimmed gray.
-  { tag: [tags.quote, tags.contentSeparator], color: "#8a8a8a" },
+  { tag: [tags.quote, tags.contentSeparator], color: "var(--oy-marker)" },
   // List item bodies: muted violet, quieter than headings.
-  { tag: tags.list, color: "#8a6da8" },
+  { tag: tags.list, color: "var(--oy-list)" },
   // Backslash escapes: quiet gray, like other markup.
-  { tag: tags.escape, color: "#8a8a8a" },
+  { tag: tags.escape, color: "var(--oy-marker)" },
   // Markup markers (heading #, list -/*, quote >, link brackets, code
   // backticks, fence delimiters): quiet gray so markers recede and content
   // carries the color.
-  { tag: tags.processingInstruction, color: "#8a8a8a" },
+  { tag: tags.processingInstruction, color: "var(--oy-marker)" },
   // Headings: semibold slate. Declared last so the `#` markers (which also
   // carry processingInstruction) adopt the heading color.
-  { tag: tags.heading, color: "#5b6e8c", fontWeight: "600" },
+  { tag: tags.heading, color: "var(--oy-heading)", fontWeight: "600" },
 ]);
 
 /**
