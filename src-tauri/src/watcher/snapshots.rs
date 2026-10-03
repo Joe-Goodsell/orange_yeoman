@@ -21,7 +21,8 @@ pub(crate) enum DiffKind {
 
 // One per-block change between two snapshots. For Added/Removed only the
 // matching excerpt is set; for Changed both are set and the line range is the
-// new block's.
+// new block's. The hashes mirror the excerpts so backend events can identify
+// the changed block without re-reading the snapshot lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotDiff {
     pub(crate) kind: DiffKind,
@@ -29,6 +30,8 @@ pub(crate) struct SnapshotDiff {
     pub(crate) end_line: usize,
     pub(crate) old_excerpt: Option<String>,
     pub(crate) new_excerpt: Option<String>,
+    pub(crate) old_hash: Option<String>,
+    pub(crate) new_hash: Option<String>,
 }
 
 // Collapse whitespace to single spaces, trim, and cap at `cap` chars. Keeps
@@ -140,6 +143,8 @@ fn push_region_diffs(
             end_line: new_block.end_line,
             old_excerpt: Some(old_block.excerpt.clone()),
             new_excerpt: Some(new_block.excerpt.clone()),
+            old_hash: Some(old_block.hash.clone()),
+            new_hash: Some(new_block.hash.clone()),
         });
         return;
     }
@@ -150,6 +155,8 @@ fn push_region_diffs(
             end_line: block.end_line,
             old_excerpt: Some(block.excerpt.clone()),
             new_excerpt: None,
+            old_hash: Some(block.hash.clone()),
+            new_hash: None,
         });
     }
     for block in new_region {
@@ -159,6 +166,8 @@ fn push_region_diffs(
             end_line: block.end_line,
             old_excerpt: None,
             new_excerpt: Some(block.excerpt.clone()),
+            old_hash: None,
+            new_hash: Some(block.hash.clone()),
         });
     }
 }

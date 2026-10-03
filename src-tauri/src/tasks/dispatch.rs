@@ -1,6 +1,7 @@
 //! Async task dispatch: runs a provider call on the async runtime while
 //! emitting Tauri events as the task progresses.
 
+use crate::events::{emit_backend_event, now_ms, BackendEvent, BlockRef, EventStatus, EventType};
 use tauri::async_runtime;
 use tauri::{AppHandle, Emitter};
 
@@ -85,12 +86,57 @@ pub(crate) fn llm_call_model_label(
         .unwrap_or_else(|| "<unset>".to_string())
 }
 
+/// The cost reported on an llm_call lifecycle event: Some(0.0) for the mock
+/// provider (identified by "mock" in its model label) and None for a real
+/// provider, where the cost is unknown.
+pub(crate) fn cost_for_model_label(model_label: &str) -> Option<f64> {
+    if model_label.contains("mock") {
+        Some(0.0)
+    } else {
+        None
+    }
+}
+
+/// Build a full llm_call backend event for one lifecycle point. The task id
+/// anchors the card so all lifecycle emissions collapse into one; `created_at`
+/// stays fixed while `ts` refreshes on each emission.
+pub(crate) fn llm_event(
+    task_id: String,
+    status: EventStatus,
+    created_at: u64,
+    ts: u64,
+    duration_ms: Option<u64>,
+    model: Option<String>,
+    estimated_cost_usd: Option<f64>,
+    final_cost_usd: Option<f64>,
+    block: Option<BlockRef>,
+    summary: String,
+    detail: serde_json::Value,
+) -> BackendEvent {
+    BackendEvent {
+        id: task_id,
+        event_type: EventType::LlmCall,
+        status,
+        created_at,
+        ts,
+        duration_ms,
+        model,
+        estimated_cost_usd,
+        final_cost_usd,
+        block,
+        summary,
+        detail: Some(detail),
+    }
+}
+
 /// Dispatch an LLM task asynchronously. Returns the task_id immediately.
 /// The provider call runs in a spawned async task. Events are emitted on completion.
 ///
 /// Events:
 /// - "agent://task-updated" with TaskEvent payload when status changes to Running.
 /// - "agent://result-ready" with TaskResult payload when the task completes, goes stale, or fails.
+/// - "backend://event" with an llm_call BackendEvent at queued, in-flight, and
+///   terminal (done/failed) points, all under the task id.
 pub(crate) fn dispatch_task(
     app: AppHandle,
     store: std::sync::Arc<TaskStore>,
@@ -102,6 +148,39 @@ pub(crate) fn dispatch_task(
     let Some(task_id) = store.insert(metadata.clone(), &identity) else {
         return Err("duplicate automatic task already in progress".to_string());
     };
+
+    // Backend console lifecycle: report the queued task right after the insert
+    // (never on the dedup early-return above). The id is the task id so later
+    // status changes update the same card.
+    let kind_str = match request.kind {
+        crate::llm::LlmRequestKind::Extraction => "extraction",
+        crate::llm::LlmRequestKind::FactCheck => "fact_check",
+        crate::llm::LlmRequestKind::Research => "research",
+    };
+    let model_label = llm_call_model_label(provider.as_ref(), &request);
+    let estimated_cost = cost_for_model_label(&model_label);
+    let created_at = now_ms();
+    let block_ref = BlockRef::from_task_metadata(&metadata);
+    emit_backend_event(
+        &app,
+        &llm_event(
+            metadata.task_id.clone(),
+            EventStatus::Queued,
+            created_at,
+            created_at,
+            None,
+            None,
+            estimated_cost,
+            None,
+            Some(block_ref.clone()),
+            format!("{kind_str} queued"),
+            serde_json::json!({
+                "kind": kind_str,
+                "trigger": metadata.trigger,
+                "taskId": metadata.task_id,
+            }),
+        ),
+    );
 
     let spawned_task_id = task_id.clone();
     async_runtime::spawn(async move {
@@ -116,20 +195,37 @@ pub(crate) fn dispatch_task(
             error: None,
         };
         let _ = app.emit("agent://task-updated", event);
+        // Backend console lifecycle: the call is now in flight with the model
+        // resolved.
+        emit_backend_event(
+            &app,
+            &llm_event(
+                spawned_task_id.clone(),
+                EventStatus::InFlight,
+                created_at,
+                now_ms(),
+                None,
+                Some(model_label.clone()),
+                estimated_cost,
+                None,
+                Some(block_ref.clone()),
+                format!("{kind_str} -> {model_label}"),
+                serde_json::json!({
+                    "kind": kind_str,
+                    "trigger": metadata.trigger,
+                    "taskId": spawned_task_id,
+                    "model": model_label,
+                }),
+            ),
+        );
 
         // Debug instrumentation: report the outgoing LLM call (kind and
         // resolved model) right before it is dispatched to the provider.
         // The category field keeps the existing "llm_call" UI category. The
         // provider's serving_model (the mock identity) overrides the request's
         // model hint so mock calls are identifiable in the debug console.
-        let kind_str = match request.kind {
-            crate::llm::LlmRequestKind::Extraction => "extraction",
-            crate::llm::LlmRequestKind::FactCheck => "fact_check",
-            crate::llm::LlmRequestKind::Research => "research",
-        };
         let request_kind = request.kind;
-        let model = llm_call_model_label(provider.as_ref(), &request);
-        tracing::info!(category = "llm_call", "{kind_str} -> {model}");
+        tracing::info!(category = "llm_call", "{kind_str} -> {model_label}");
 
         // The provider call runs in an INNER task so that a panic inside it is
         // observed by the supervisor below instead of silently hanging the
@@ -165,13 +261,15 @@ pub(crate) fn dispatch_task(
                 } else {
                     (TaskStatus::Completed, false)
                 };
-                (status, stale_flag, response.result)
+                (status, stale_flag, response.result, response.usage)
             })
         });
 
         match inner.await {
-            Ok(Ok((status, stale_flag, result_value))) => {
-                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+            Ok(Ok((status, stale_flag, result_value, usage))) => {
+                let elapsed = started.elapsed();
+                let dur = format!("{:.2}s", elapsed.as_secs_f64());
+                let elapsed_ms = elapsed.as_millis() as u64;
                 let stale_note = if stale_flag { " (stale)" } else { "" };
                 let summary = collapse_and_cap(&result_value.to_string(), 120);
                 tracing::info!(
@@ -185,6 +283,40 @@ pub(crate) fn dispatch_task(
                     spawned_task_id,
                     status_name(status)
                 );
+                // Backend console lifecycle: the call returned. The result
+                // excerpt is whitespace-collapsed and capped for the card
+                // summary; the full result stays in the agent://result-ready
+                // payload.
+                let result_excerpt = collapse_and_cap(&result_value.to_string(), 200);
+                let final_cost = cost_for_model_label(&model_label);
+                emit_backend_event(
+                    &app,
+                    &llm_event(
+                        spawned_task_id.clone(),
+                        EventStatus::Done,
+                        created_at,
+                        now_ms(),
+                        Some(elapsed_ms),
+                        Some(model_label.clone()),
+                        estimated_cost,
+                        final_cost,
+                        Some(block_ref.clone()),
+                        format!("{kind_str} returned in {elapsed:?}"),
+                        serde_json::json!({
+                            "kind": kind_str,
+                            "usage": {
+                                "inputTokens": usage.input_tokens,
+                                "outputTokens": usage.output_tokens,
+                            },
+                            "stale": stale_flag,
+                            "resultExcerpt": if result_excerpt.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::json!(result_excerpt)
+                            },
+                        }),
+                    ),
+                );
                 let result = TaskResult {
                     task_id: spawned_task_id.clone(),
                     status,
@@ -196,12 +328,33 @@ pub(crate) fn dispatch_task(
                 let _ = app.emit("agent://result-ready", result);
             }
             Ok(Err(e)) => {
-                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+                let elapsed = started.elapsed();
+                let dur = format!("{:.2}s", elapsed.as_secs_f64());
+                let elapsed_ms = elapsed.as_millis() as u64;
                 // The LlmError Display impl already scrubs key material, so
                 // the raw error is safe for the debug console at error level
                 // (always visible even with the debug flag off).
                 tracing::error!(category = "llm_call", "{kind_str} failed in {dur}: {e}");
                 let sanitized = scrub_error(&e.to_string());
+                emit_backend_event(
+                    &app,
+                    &llm_event(
+                        spawned_task_id.clone(),
+                        EventStatus::Failed,
+                        created_at,
+                        now_ms(),
+                        Some(elapsed_ms),
+                        Some(model_label.clone()),
+                        estimated_cost,
+                        None,
+                        Some(block_ref.clone()),
+                        format!("{kind_str} failed"),
+                        serde_json::json!({
+                            "kind": kind_str,
+                            "error": sanitized,
+                        }),
+                    ),
+                );
                 store.update(
                     &spawned_task_id,
                     TaskStatus::Failed,
@@ -220,11 +373,32 @@ pub(crate) fn dispatch_task(
                 let _ = app.emit("agent://result-ready", result);
             }
             Err(join_error) => {
-                let dur = format!("{:.2}s", started.elapsed().as_secs_f64());
+                let elapsed = started.elapsed();
+                let dur = format!("{:.2}s", elapsed.as_secs_f64());
+                let elapsed_ms = elapsed.as_millis() as u64;
                 // The inner task panicked. Never scrub the panic payload: the
                 // fixed safe message crosses to the frontend result payload;
                 // the panic details go to the error-level debug event and stderr.
                 let sanitized = scrub_error("internal task error");
+                emit_backend_event(
+                    &app,
+                    &llm_event(
+                        spawned_task_id.clone(),
+                        EventStatus::Failed,
+                        created_at,
+                        now_ms(),
+                        Some(elapsed_ms),
+                        Some(model_label.clone()),
+                        estimated_cost,
+                        None,
+                        Some(block_ref.clone()),
+                        format!("{kind_str} failed"),
+                        serde_json::json!({
+                            "kind": kind_str,
+                            "error": sanitized,
+                        }),
+                    ),
+                );
                 store.update(
                     &spawned_task_id,
                     TaskStatus::Failed,

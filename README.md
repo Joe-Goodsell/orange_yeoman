@@ -1,17 +1,14 @@
 # Orange Yeoman
 
-Orange Yeoman is an AI-powered macOS app that watches a repository of `.md` notes and gives real-time and async feedback — corrections, fact-checking, and web-sourced research — as you write. The central goal is feedback on your notes while you write uninterrupted: AI processing is decoupled and async, with results surfacing in a side pane rather than blocking input. The app is an agnostic watcher/overlay over a plain `.md` folder, not the exclusive owner of the data — notes may be created or edited in other tools (e.g. Obsidian) and the app continues to watch the repo and process changes.
+Orange Yeoman is an AI-powered macOS app that watches a repository of `.md` notes and runs corrections, fact-checking, and web-sourced research in the background. The current UI is a single-pane backend debug console that renders the backend's activity in real time as structured event cards. The app is an agnostic watcher/overlay over a plain `.md` folder, not the exclusive owner of the data — notes may be created or edited in other tools (e.g. Obsidian) and the app continues to watch the repo and process changes.
 
 ## Features
 
 - Watches changes to a repository of `.md` files.
-- Provides fact-checking and logic-checking for claims in your notes.
-- Searches the web for sources that support or refute those claims.
-- Runs autonomous research in an async manner, preferring discounted batch processing where possible.
-- Slash commands are the canonical editor surface: `/research`, `/fact-check`, `/ignore` (to skip a block of text), with more to follow.
-- Bare-bones plaintext markdown editor in the main pane — a distraction-free writing surface, no markdown rendering yet.
-- Right-hand side pane shows what the AI agents are doing (status, progress, results) while writing stays uninterrupted.
-- Folder/file tree mirrors the on-disk repository structure exactly; there is no app-owned note database.
+- Runs fact-checking, logic-checking, and web-sourced research in the background, preferring discounted batch processing where possible.
+- Single-pane UI: a real-time backend debug console rendering the events Rust emits on the `backend://event` channel.
+- Event cards update in place by id, so one card tracks a full lifecycle (queued, in flight, done, failed) and shows type, status, model, duration, cost, and expandable detail.
+- The app is an overlay over a plain `.md` folder, not the exclusive owner of the data; there is no app-owned note database.
 
 ## Stack
 
@@ -55,8 +52,8 @@ outline.md    Project intent / source of truth
 
 ## Roadmap
 
-- Vim keybindings in the editor (high priority).
-- Syntax highlighting in the editor (high priority).
+- Reintroduce the markdown editor (the current build is console-only).
+- Slash commands as the editor surface: `/research`, `/fact-check`, `/ignore`.
+- Vim keybindings and syntax highlighting in the editor (high priority).
 - Markdown rendering (render `.md` as formatted output, live preview).
-- Better contextual slash commands dropdown (rank and filter commands by surrounding context).
 - iOS app, and possibly Android/Windows/Web apps later on.

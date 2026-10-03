@@ -1,36 +1,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type {
-  ChangeEvent,
-  ConfigStatus,
-  DebugEvent,
-  FileEntry,
-  LlmRequest,
-  LlmResponse,
-  TaskEvent,
-  TaskMetadata,
-  TaskResult,
-} from "./types";
+import type { BackendEvent, ConfigStatus } from "./types";
 
 export async function pickFolder(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false });
   return typeof result === "string" ? result : null;
-}
-
-export async function listDir(dir: string): Promise<FileEntry[]> {
-  return invoke<FileEntry[]>("list_dir", { dir });
-}
-
-export async function readTextFile(path: string): Promise<string> {
-  return invoke<string>("read_text_file", { path });
-}
-
-// Returns the stable content hash of the written bytes; the watcher stamps the
-// same hash on the resulting content event so the store can recognize
-// self-writes.
-export async function writeTextFile(path: string, contents: string): Promise<string> {
-  return invoke<string>("write_text_file", { path, contents });
 }
 
 export async function startWatcher(root: string): Promise<void> {
@@ -39,21 +14,6 @@ export async function startWatcher(root: string): Promise<void> {
 
 export async function stopWatcher(): Promise<void> {
   return invoke<void>("stop_watcher");
-}
-
-// Payload emitted by Rust on the "watcher://change" channel.
-export interface WatcherEvent {
-  path: string;
-  kind: "structure" | "content";
-  // Content hash of the new on-disk content; present only on content events.
-  hash?: string;
-}
-
-export function onWatcherChange(cb: (e: ChangeEvent) => void): Promise<UnlistenFn> {
-  return listen<WatcherEvent>("watcher://change", (event) => {
-    const { path, kind, hash } = event.payload;
-    cb({ path, kind, ts: Date.now(), ...(hash !== undefined ? { hash } : {}) });
-  });
 }
 
 // Config commands. The payloads are ConfigStatus, which never contain API key
@@ -69,88 +29,8 @@ export function onConfigChanged(cb: (s: ConfigStatus) => void): Promise<Unlisten
   return listen<ConfigStatus>("config://changed", (event) => cb(event.payload));
 }
 
-// Emitted by Rust on the "debug://event" channel. Error and warning events
-// always arrive; info and below arrive only when the `debug` config flag is
-// true. The payload carries a `level` and a Rust-stamped `ts` (ms since UNIX
-// epoch); the frontend does not guess the timestamp.
-export function onDebugEvent(cb: (e: DebugEvent) => void): Promise<UnlistenFn> {
-  return listen<{
-    category: string;
-    message: string;
-    level: "error" | "warn" | "info" | "debug" | "trace";
-    ts: number;
-  }>("debug://event", (event) => {
-    cb({
-      category: event.payload.category,
-      message: event.payload.message,
-      level: event.payload.level,
-      ts: event.payload.ts,
-    });
-  });
-}
-
-// LLM completion through the provider boundary. Rust selects the provider
-// from the mockLlm config flag. It uses the mock provider when the flag is
-// true and the real provider when it is false. No editor, store, or UI wiring
-// yet; this is the thin invoke wrapper for the boundary.
-export async function completeLlm(request: LlmRequest): Promise<LlmResponse> {
-  return invoke<LlmResponse>("complete_llm", { request });
-}
-
-// Task submission and status commands. These wire the pipeline to the task
-// store in Rust. Block submissions may return null when routing decides the
-// block needs no work; explicit fact-check and research submissions always
-// return a task id.
-
-export async function submitBlock(
-  filePath: string | null,
-  blockText: string,
-): Promise<string | null> {
-  return invoke<string | null>("submit_block", { filePath, blockText });
-}
-
-export async function submitFactCheck(
-  filePath: string | null,
-  claimText: string,
-  blockText: string,
-  headingChain: string[],
-  sourceHash: string,
-): Promise<string> {
-  return invoke<string>("submit_fact_check", {
-    filePath,
-    claimText,
-    blockText,
-    headingChain,
-    sourceHash,
-  });
-}
-
-export async function submitResearch(
-  filePath: string | null,
-  goal: string,
-  selection: string,
-  document: string,
-  sourceHash: string,
-): Promise<string> {
-  return invoke<string>("submit_research", {
-    filePath,
-    goal,
-    selection,
-    document,
-    sourceHash,
-  });
-}
-
-export async function getTaskStatus(taskId: string): Promise<TaskMetadata | null> {
-  return invoke<TaskMetadata | null>("get_task_status", { taskId });
-}
-
-// Task lifecycle events emitted by Rust on the "agent://" channels.
-
-export function onTaskUpdated(cb: (event: TaskEvent) => void): Promise<UnlistenFn> {
-  return listen<TaskEvent>("agent://task-updated", (event) => cb(event.payload));
-}
-
-export function onResultReady(cb: (result: TaskResult) => void): Promise<UnlistenFn> {
-  return listen<TaskResult>("agent://result-ready", (event) => cb(event.payload));
+// Structured backend event cards emitted by Rust on the "backend://event"
+// channel. Events with the same id update the same card in place.
+export function onBackendEvent(cb: (e: BackendEvent) => void): Promise<UnlistenFn> {
+  return listen<BackendEvent>("backend://event", (event) => cb(event.payload));
 }

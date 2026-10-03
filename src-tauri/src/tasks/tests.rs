@@ -702,3 +702,181 @@ fn llm_call_model_label_real_unset_model_is_unset() {
         "<unset>"
     );
 }
+
+// --- llm_call lifecycle event tests ---
+//
+// dispatch_task needs a real AppHandle and cannot run in a unit test, so the
+// llm_call lifecycle contract is verified through its pure pieces: the
+// llm_event builder and the cost-for-model decision, using the same argument
+// patterns dispatch_task passes at the queued / in_flight / done / failed
+// points.
+
+// The mock provider (label contains "mock") reports Some(0.0) costs; a real
+// provider reports None (cost unknown).
+#[test]
+fn llm_call_cost_is_zero_for_mock_and_unknown_for_real_model() {
+    assert_eq!(cost_for_model_label("mock-provider-v1"), Some(0.0));
+    assert_eq!(cost_for_model_label("deepseek-chat"), None);
+}
+
+// Build the four lifecycle events the way dispatch_task wires them: one task
+// id, a fixed created_at, a block ref from the metadata, and the model label
+// that drives the cost fields.
+fn llm_lifecycle_events(
+    meta: &TaskMetadata,
+    model_label: &str,
+) -> (
+    crate::events::BackendEvent,
+    crate::events::BackendEvent,
+    crate::events::BackendEvent,
+    crate::events::BackendEvent,
+) {
+    let task_id = meta.task_id.clone();
+    let created_at = 1000;
+    let block = Some(crate::events::BlockRef::from_task_metadata(meta));
+    let estimated_cost = cost_for_model_label(model_label);
+    let final_cost = cost_for_model_label(model_label);
+    let queued = llm_event(
+        task_id.clone(),
+        crate::events::EventStatus::Queued,
+        created_at,
+        created_at,
+        None,
+        None,
+        estimated_cost,
+        None,
+        block.clone(),
+        "extraction queued".to_string(),
+        serde_json::json!({"kind": "extraction"}),
+    );
+    let in_flight = llm_event(
+        task_id.clone(),
+        crate::events::EventStatus::InFlight,
+        created_at,
+        created_at + 10,
+        None,
+        Some(model_label.to_string()),
+        estimated_cost,
+        None,
+        block.clone(),
+        format!("extraction -> {model_label}"),
+        serde_json::json!({"kind": "extraction"}),
+    );
+    let done = llm_event(
+        task_id.clone(),
+        crate::events::EventStatus::Done,
+        created_at,
+        created_at + 20,
+        Some(123),
+        Some(model_label.to_string()),
+        estimated_cost,
+        final_cost,
+        block.clone(),
+        "extraction returned".to_string(),
+        serde_json::json!({"kind": "extraction"}),
+    );
+    let failed = llm_event(
+        task_id,
+        crate::events::EventStatus::Failed,
+        created_at,
+        created_at + 20,
+        Some(99),
+        Some(model_label.to_string()),
+        estimated_cost,
+        None,
+        block,
+        "extraction failed".to_string(),
+        serde_json::json!({"kind": "extraction"}),
+    );
+    (queued, in_flight, done, failed)
+}
+
+// All four lifecycle events anchor to the task id, carry the llm_call type and
+// the fixed created_at, and move Queued -> InFlight -> Done/Failed.
+#[test]
+fn llm_call_lifecycle_events_share_task_id_and_statuses() {
+    let meta = task_metadata("t1", crate::pipeline::Trigger::Automatic);
+    let events = llm_lifecycle_events(&meta, "mock-provider-v1");
+    for event in [&events.0, &events.1, &events.2, &events.3] {
+        assert_eq!(event.id, "t1");
+        assert_eq!(event.event_type, crate::events::EventType::LlmCall);
+        assert_eq!(event.created_at, 1000);
+    }
+    assert_eq!(events.0.status, crate::events::EventStatus::Queued);
+    assert_eq!(events.1.status, crate::events::EventStatus::InFlight);
+    assert_eq!(events.2.status, crate::events::EventStatus::Done);
+    assert_eq!(events.3.status, crate::events::EventStatus::Failed);
+}
+
+// The model is unknown while queued and resolved from then on; duration_ms is
+// None until the terminal status, where the call duration is reported.
+#[test]
+fn llm_call_model_and_duration_fill_in_as_the_call_progresses() {
+    let meta = task_metadata("t1", crate::pipeline::Trigger::Automatic);
+    let events = llm_lifecycle_events(&meta, "mock-provider-v1");
+    assert_eq!(events.0.model, None);
+    assert_eq!(events.1.model.as_deref(), Some("mock-provider-v1"));
+    assert_eq!(events.2.model.as_deref(), Some("mock-provider-v1"));
+    assert_eq!(events.3.model.as_deref(), Some("mock-provider-v1"));
+    assert_eq!(events.0.duration_ms, None);
+    assert_eq!(events.1.duration_ms, None);
+    assert!(events.2.duration_ms.is_some());
+    assert!(events.3.duration_ms.is_some());
+}
+
+// Mock provider: every lifecycle event estimates Some(0.0); only the done
+// event finalizes the cost, and the failed event never does.
+#[test]
+fn llm_call_mock_model_estimates_zero_and_finalizes_on_done() {
+    let meta = task_metadata("t1", crate::pipeline::Trigger::Automatic);
+    let events = llm_lifecycle_events(&meta, "mock-provider-v1");
+    for event in [&events.0, &events.1, &events.2, &events.3] {
+        assert_eq!(event.estimated_cost_usd, Some(0.0));
+    }
+    assert_eq!(events.0.final_cost_usd, None);
+    assert_eq!(events.1.final_cost_usd, None);
+    assert_eq!(events.2.final_cost_usd, Some(0.0));
+    assert_eq!(events.3.final_cost_usd, None);
+}
+
+// Real provider: costs stay unknown (None) on every lifecycle event.
+#[test]
+fn llm_call_real_model_reports_unknown_costs() {
+    let meta = task_metadata("t1", crate::pipeline::Trigger::Automatic);
+    let events = llm_lifecycle_events(&meta, "deepseek-chat");
+    for event in [&events.0, &events.1, &events.2, &events.3] {
+        assert_eq!(event.estimated_cost_usd, None);
+        assert_eq!(event.final_cost_usd, None);
+    }
+}
+
+// The block link on every lifecycle event comes from TaskMetadata: the block
+// hash and the inline focus range (position_start/position_end), with the file
+// path when the task has one.
+#[test]
+fn llm_call_block_link_comes_from_task_metadata() {
+    let meta = TaskMetadata {
+        task_id: "t1".to_string(),
+        file_path: Some("notes/a.md".to_string()),
+        block_hash: "hash123".to_string(),
+        source_hash: "s".to_string(),
+        focus_start: Some(10),
+        focus_end: Some(42),
+        line_text_hash: None,
+        trigger: crate::pipeline::Trigger::Inline,
+        status: TaskStatus::Queued,
+        stale: false,
+        error: None,
+    };
+    let events = llm_lifecycle_events(&meta, "mock-provider-v1");
+    for event in [&events.0, &events.1, &events.2, &events.3] {
+        let block = event
+            .block
+            .as_ref()
+            .expect("llm_call events carry a block link");
+        assert_eq!(block.block_hash, "hash123");
+        assert_eq!(block.file_path.as_deref(), Some("notes/a.md"));
+        assert_eq!(block.position_start, Some(10));
+        assert_eq!(block.position_end, Some(42));
+    }
+}

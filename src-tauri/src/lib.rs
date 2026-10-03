@@ -6,6 +6,7 @@
 // modify).
 
 mod config;
+mod events;
 mod filesystem;
 mod incremental;
 mod llm;
