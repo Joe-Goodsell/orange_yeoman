@@ -22,11 +22,14 @@ pub(crate) use commands::{
     __tauri_command_name_submit_research, __tauri_command_name_get_task_status,
 };
 pub(crate) use store::TaskStore;
+// The task metadata is part of the backend event schema (BlockRef references
+// it), so it is a permanent root re-export rather than a test-only one.
+pub(crate) use types::TaskMetadata;
 
 // Test-only re-exports. The sibling submodules import their items directly;
 // the root re-exports these solely so tasks/tests.rs can keep `use super::*;`.
 #[cfg(test)]
-pub(crate) use dispatch::{llm_call_model_label, scrub_error};
+pub(crate) use dispatch::{cost_for_model_label, llm_call_model_label, llm_event, scrub_error};
 #[cfg(test)]
 pub(crate) use ids::{
     dedup_identity, fact_check_task_id, research_task_id, task_id_from_identity, DedupIdentity,
@@ -34,7 +37,7 @@ pub(crate) use ids::{
 #[cfg(test)]
 pub(crate) use staleness::{is_inline_result_stale, is_result_stale};
 #[cfg(test)]
-pub(crate) use types::{TaskEvent, TaskMetadata, TaskResult, TaskStatus};
+pub(crate) use types::{TaskEvent, TaskResult, TaskStatus};
 
 #[cfg(test)]
 mod tests;
